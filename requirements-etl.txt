@@ -1,0 +1,8 @@
+# ETL (src/etl). Tested with both sets below; content hashes are identical across them.
+#   numpy 2.1.3 / pandas 2.2.3 / pyarrow 18.1.0
+#   numpy 2.5.3 / pandas 3.0.5 / pyarrow 26.0.1
+# After installing, freeze your exact versions for the submission repo:
+#   pip freeze > requirements.lock
+numpy>=1.24
+pandas>=2.0
+pyarrow>=14

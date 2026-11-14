@@ -63,8 +63,8 @@ venv/
 env/
 .DS_Store
 
-# -- team additions ----------------------------------------------------------------------------
-# Public datasets from other matches are downloaded locally, never committed.
-external-data/
-outputs/
-.ipynb_checkpoints/
+# -- ETL output (src/etl) ---------------------------------------------------------------------
+# Frame-level exports reconstruct the licensed data: never commit them. report.txt is safe to
+# share but lives here too, so it is regenerated rather than stale.
+cache/
+tests/out/
