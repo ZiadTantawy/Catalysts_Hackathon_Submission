@@ -107,6 +107,13 @@ def _bridge_gaps(x, y, obs, half, stats):
     same_half = np.zeros(n, dtype=bool)
     same_half[ok_ends] = half[prev[ok_ends]] == half[nxt[ok_ends]]
     fill = (~obs) & ok_ends & same_half & (gap <= C.INTERP_MAX_GAP)
+    # never bridge a gap the ball could not physically have crossed (docs/PLAN.md D5)
+    p_, q_ = np.clip(prev, 0, n - 1), np.clip(nxt, 0, n - 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        implied = np.hypot(x[q_] - x[p_], y[q_] - y[p_]) / ((nxt - prev) / C.FPS)
+    impossible = fill & (implied > C.BALL_MAX_SPEED)
+    stats["n_gap_frames_not_bridged"] = int(impossible.sum())
+    fill &= ~impossible
     xi, yi = x.copy(), y.copy()
     if fill.any():
         p, q = prev[fill], nxt[fill]
@@ -209,14 +216,13 @@ def clean(b_m, half):
         "ball_speed": speed.astype(np.float32),
     }
     if b_m.shape[1] >= 3:
-        z = np.where(obs, b_m[:, 2], np.nan).astype(np.float32)
+        # meaning unknown (docs/PLAN.md D6): kept raw, never turned into a feature
+        z = b_m[:, 2].astype(np.float32)
         zk = np.isfinite(z)
-        aerial = np.full(n, -1, dtype=np.int8)
-        aerial[zk] = (z[zk] > C.BALL_AERIAL_Z).astype(np.int8)
-        cols["ball_z"] = z
-        cols["ball_aerial"] = aerial
-        both = zk & np.isfinite(speed)
+        cols["ball_ch3"] = z
+        both = zk & obs & np.isfinite(speed)
         stats["third_channel_present"] = float(zk.mean())
+        stats["third_channel_without_xy"] = int((zk & ~obs).sum())
         stats["third_channel_corr_with_speed"] = (
             float(np.corrcoef(z[both], speed[both])[0, 1]) if both.sum() > 100 else float("nan"))
         stats["third_channel_p50_p99"] = (

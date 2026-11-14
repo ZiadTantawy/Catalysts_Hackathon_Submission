@@ -1,5 +1,6 @@
 """Aggregate statistics and the shareable build report (cache/report.txt)."""
 
+import os
 import platform
 
 import numpy as np
@@ -45,6 +46,78 @@ def cam_stats(cam, ball_cols, feat, graded):
             float(np.median(np.abs(pc[both] - ball_cols["ball_x"][both])))
             if both.any() else float("nan")),
     }
+
+
+def video_time(frame):
+    """h:mm:ss on the tactical video."""
+    sec = frame / C.FPS
+    return "{:d}:{:02d}:{:02d}".format(int(sec // 3600), int(sec % 3600 // 60), int(sec % 60))
+
+
+def match_clock(frame):
+    """mm:ss of the match clock from the published kickoffs (negative before a kickoff)."""
+    if frame <= C.HALF_BLOCKS[0][2]:
+        t = (frame - C.HALF_BLOCKS[0][1]) / C.FPS
+    elif frame < C.KICKOFF_2ND:
+        t = (C.KICKOFF_2ND - frame) / C.FPS
+        return "2nd-half kickoff -{:02d}:{:02d}".format(int(t // 60), int(t % 60))
+    else:
+        t = 2700 + (frame - C.KICKOFF_2ND) / C.FPS
+    return "{:02d}:{:02d}".format(int(t // 60), int(t % 60))
+
+
+def stretches(mask, graded, min_len=1, top=3):
+    """{frames, stretches, longest: [(len, start)]} of a boolean mask inside graded play."""
+    st, en, val = runs((mask & graded).astype(np.int8))
+    keep = (val == 1) & ((en - st) >= min_len)
+    st, en = st[keep], en[keep]
+    return {"frames": int((en - st).sum()), "stretches": int(len(st)),
+            "longest": sorted(((int(b - a), int(a)) for a, b in zip(st, en)), reverse=True)[:top]}
+
+
+def diagnostics(pl, ball_cols, feat, cam, graded):
+    """The invariant sweep (docs/PLAN.md): report-only counts, so new kinds of error show up."""
+    from .util import out_dist
+    X, Y, meas = pl["X"], pl["Y"], pl["meas"]
+    with np.errstate(invalid="ignore"):
+        off3 = (meas & (out_dist(X, Y) > 3.0)).any(axis=1)
+    bx, by = ball_cols["ball_x"].astype(float), ball_cols["ball_y"].astype(float)
+    obs = ball_cols["ball_observed"]
+    step = np.full(len(bx), np.nan)
+    adj = obs[1:] & obs[:-1]
+    step[1:] = np.where(adj, np.hypot(np.diff(bx), np.diff(by)) * C.FPS, np.nan)
+    med = pd.Series(step).rolling(12, min_periods=3, center=True).median().to_numpy()
+    with np.errstate(invalid="ignore"):
+        b_out_moving = obs & (out_dist(bx, by) > 3.0) & (med > 5.0)
+        cam_jump = np.zeros(len(bx), dtype=bool)
+        cam_jump[1:] = np.hypot(np.diff(cam["cam_cx"]), np.diff(cam["cam_cy"])) > 2.0
+    return {
+        "P4 measured player > 3 m outside the pitch": stretches(off3, graded),
+        "B1 ball faster than 42 m/s between consecutive frames": stretches(step > C.BALL_MAX_SPEED, graded),
+        "B3 ball > 3 m outside the pitch and moving > 5 m/s": stretches(b_out_moving, graded, 5),
+        "F1 camera centre jumps > 2 m in one frame": stretches(cam_jump, graded),
+        "F2 homography reprojection error > 2": stretches(cam["cam_reproj_error"] > 2, graded, 5),
+    }
+
+
+def compare_previous(path, df):
+    """How much the nearest-team answer changed against the frames table already on disk."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        old = pd.read_parquet(path, columns=["closer_team", "graded"])
+    except Exception:                                   # noqa: BLE001 -- an old or partial file
+        return None
+    if len(old) != len(df):
+        return None
+    g = df["graded"].to_numpy()
+    a, b = old["closer_team"].to_numpy(), df["closer_team"].to_numpy()
+    either = g & ((a != 0) | (b != 0))
+    near = g & (df["d1_min"].to_numpy() < 3)
+    return {"frames_with_an_answer": int(either.sum()),
+            "changed": int((either & (a != b)).sum()),
+            "on_ball_frames": int(near.sum()),
+            "on_ball_changed": int((near & (a != b)).sum())}
 
 
 def write_report(path, ctx):
@@ -125,8 +198,10 @@ def write_report(path, ctx):
         w("  3rd ball channel: present {:.1%}, corr with ball speed {:.2f}, p50/p99 {}".format(
             bs["third_channel_present"], bs["third_channel_corr_with_speed"],
             tuple(round(v, 2) for v in bs["third_channel_p50_p99"] or ())))
-        w("     -> treated as height; aerial (> {} m) on {:.1%} of frames where present".format(
-            C.BALL_AERIAL_Z, (df["ball_aerial"] == 1).sum() / max(1, (df["ball_aerial"] >= 0).sum())))
+        w("     present on {:,} frames with no ball position; meaning unknown -> kept raw as ball_ch3, not a feature".format(
+            bs["third_channel_without_xy"]))
+    w("  short gaps NOT bridged (implied speed > {:.0f} m/s): {:,} frames".format(
+        C.BALL_MAX_SPEED, bs.get("n_gap_frames_not_bridged", 0)))
     w("")
     w("CAMERA (homography)")
     w("  image centre on pitch known: {:.1%} of graded frames".format(df.loc[g, "cam_cx"].notna().mean()))
@@ -149,8 +224,10 @@ def write_report(path, ctx):
         df.loc[g, "n_tracked"].mean(), df.loc[g, "h_n_tracked"].mean(),
         df.loc[g, "a_n_tracked"].mean()))
     hs = ctx["hygiene"]
-    w("  speed filled from positions: {:,} points   duplicate track points removed: {:,}".format(
-        hs["speed_filled_from_positions"], hs["duplicate_track_points"]))
+    w("  positions present {:,}, measured (speed present) {:.1%}; the rest are the tracker's guesses".format(
+        hs["positions_present"], hs["positions_measured"] / max(1, hs["positions_present"])))
+    w("  speed derived from positions for tempo features: {:,} points   duplicate track points removed: {:,}".format(
+        hs["speed_derived_from_positions"], hs["duplicate_track_points"]))
     w("  off-pitch points: {:,} just outside (kept for ball distance), {:,} far outside (dropped)".format(
         hs["off_pitch_points"], hs["far_off_points_dropped"]))
     on_h = df["h_n_tracked"] - df["h_n_off_pitch"]
@@ -165,6 +242,35 @@ def write_report(path, ctx):
     w("  nearest player to ball: median {:.1f} m (home closer on {:.1%} of frames with a ball)".format(
         df.loc[g, "d1_min"].median(),
         (df.loc[g, "closer_team"] == 1).sum() / max(1, (df.loc[g, "closer_team"] != 0).sum())))
+    w("")
+    w("CORRECTIONS (docs/PLAN.md)")
+    w("  P6 keeper slot given the team defending the goal it stands at: {} frames changed (by slot)".format(
+        hs["keeper_team_changed"]))
+    w("     unmeasured keeper-slot positions in the opponent's half dropped as ghosts: {}".format(
+        hs["keeper_ghosts_dropped"]))
+    w("  P9 opposite-team one-object pairs: {:,} track points; frames where the nearest measured player is one (contested, no team): {:,}".format(
+        hs["xdup_points"], hs["contested_frames"]))
+    w("  D4 contact runs rejected (ball passed without reacting): {:,}".format(hs["contact_runs_rejected_flyby"]))
+    ch = ctx.get("change")
+    if ch:
+        w("  nearest-team answer vs the previous build: changed on {:,} of {:,} graded frames with an answer ({:.1%}); on-ball (< 3 m) {:,} of {:,} ({:.1%})".format(
+            ch["changed"], ch["frames_with_an_answer"], ch["changed"] / max(1, ch["frames_with_an_answer"]),
+            ch["on_ball_changed"], ch["on_ball_frames"], ch["on_ball_changed"] / max(1, ch["on_ball_frames"])))
+    else:
+        w("  nearest-team answer vs the previous build: no previous build to compare")
+    w("")
+    w("SITUATIONS (dead-ball cues, graded frames; longest stretches as video time / match clock)")
+    for name, st in ctx["situations"].items():
+        w("  {:<18} {:>7,} frames in {:>4} stretches   longest: {}".format(
+            name, st["frames"], st["stretches"],
+            ", ".join("{} / {} ({:.1f} s)".format(video_time(a), match_clock(a), l / C.FPS)
+                      for l, a in st["longest"]) or "-"))
+    w("")
+    w("DIAGNOSTICS (report only, never corrected; a new non-zero line deserves a look in the video)")
+    for name, st in ctx["diagnostics"].items():
+        w("  {:<54} {:>6,} frames in {:>3} stretches   longest: {}".format(
+            name, st["frames"], st["stretches"],
+            ", ".join("{} ({:.1f} s)".format(video_time(a), l / C.FPS) for l, a in st["longest"]) or "-"))
     w("")
     w("FRAMES TABLE")
     w("  {:,} rows x {} columns".format(*df.shape))

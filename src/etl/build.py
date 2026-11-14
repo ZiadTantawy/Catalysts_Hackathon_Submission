@@ -11,7 +11,10 @@ licensed data):
     cache/events.parquet      ball events (impulses, contacts, exits/entries, lost/found)
     cache/ball_runs.parquet   one row per continuous stretch of observed ball
     cache/tagging.parquet     Smart Tagging intervals in frames, team mapped to H / A / N/A
-    cache/players_m.npy       [199319, 46, C] oriented metres (home attacks +x), for new features
+    cache/players_m.npy       [199319, 46, C] oriented metres (home attacks +x), as delivered
+    cache/players_meas.npy    [199319, 46] bool, position measured (speed present), not guessed
+    cache/players_team.npy    [199319, 46] int8 per-frame team after corrections (-1 = dropped)
+    cache/players_keeper.npy  [199319, 46] bool, per-frame goalkeeper role
     cache/ball_m.npy          [199319, Cb] oriented metres, raw (before cleaning)
     cache/slot_team.npy       [46] 0 = home, 1 = away
     cache/manifest.json       inputs' sha256, every parameter, output content hashes
@@ -32,7 +35,7 @@ import numpy as np
 import pandas as pd
 
 from . import (__version__, ball, checks, config as C, features, io_atd, io_homography,
-               io_tagging, orient, report)
+               io_tagging, orient, players, report, situations)
 from games import require  # noqa: E402  (config puts the repo root on sys.path)
 
 PARAM_NAMES = [k for k in dir(C) if k.isupper() and k not in ("ROOT", "CACHE_DIR")]
@@ -88,7 +91,7 @@ def build(data_dir=None, out_dir=C.CACHE_DIR, force_parse=False, quiet=False):
 
     say("[1/8] metadata + raw tracking")
     meta = io_atd.read_meta(meta_path)
-    players, ball_raw, raw_info, widths = load_raw(
+    raw_players, ball_raw, raw_info, widths = load_raw(
         raw_path, inputs[os.path.basename(raw_path)][1], out_dir, force_parse)
     if widths[0] != len(meta["slot_team"]):
         raise ValueError("raw file has {} slots, metadata {}".format(widths[0], len(meta["slot_team"])))
@@ -96,12 +99,12 @@ def build(data_dir=None, out_dir=C.CACHE_DIR, force_parse=False, quiet=False):
 
     say("[2/8] camera (homography)")
     H, hvalid, herr = io_homography.load(hom_path)
-    cam = io_homography.camera_features(H, hvalid, herr, players, ball_raw)
+    cam = io_homography.camera_features(H, hvalid, herr, raw_players, ball_raw)
     del H
 
     say("[3/8] timeline + orientation")
     tl = orient.timeline()
-    p_m, b_m = orient.to_metres(players, ball_raw)
+    p_m, b_m = orient.to_metres(raw_players, ball_raw)
     flips = orient.detect_flips(p_m, slot_team, tl["half"])
     p_o, b_o, flip_frame = orient.apply_orientation(p_m, b_m, tl["phase"], flips)
     del p_m, b_m
@@ -117,11 +120,15 @@ def build(data_dir=None, out_dir=C.CACHE_DIR, force_parse=False, quiet=False):
     cam["cam_d_ball"] = np.hypot(cam["cam_cx"] - ball_cols["ball_x"],
                                  cam["cam_cy"] - ball_cols["ball_y"]).astype(np.float32)
 
-    say("[5/8] team, contest and dead-ball features")
-    feat, near, hyg_stats = features.team_contest_deadball(
-        p_o, slot_team, meta["slot_is_gk"], ball_cols)
-    con_cols, con_episodes = features.contacts(feat, tl["half"])
+    say("[5/8] players, team, contest and dead-ball features")
+    pl, pl_stats = players.prepare(p_o, slot_team, meta["slot_is_gk"])
+    feat, near, hyg_stats, _ = features.team_contest_deadball(p_o, pl, ball_cols)
+    hyg_stats.update(pl_stats)
+    con_cols, con_episodes, con_stats = features.contacts(feat, tl["half"], ball_cols)
     feat.update(con_cols)
+    hyg_stats.update(con_stats)
+    sit_cols, sit_stats = situations.compute(pl, feat, ball_cols, tl)
+    diag = report.diagnostics(pl, ball_cols, feat, cam, tl["graded"])
 
     say("[6/8] smart tagging")
     iv = io_tagging.load(tag_path, meta["home_name"], meta["away_name"])
@@ -129,13 +136,14 @@ def build(data_dir=None, out_dir=C.CACHE_DIR, force_parse=False, quiet=False):
 
     say("[7/8] assemble + events + context windows")
     df = pd.DataFrame({"frame": np.arange(C.N_FRAMES, dtype=np.int32), **tl,
-                       "rotated": flip_frame, **ball_cols, **feat, **cam, **tag_cols})
+                       "rotated": flip_frame, **ball_cols, **feat, **sit_cols, **cam, **tag_cols})
     df = pd.concat([df, features.context_windows(df)], axis=1)
     ev, ev_noise = ball.events(ball_cols, tl["half"], near, con_episodes)
     runs_df, run_id = ball.runs_table(ball_cols, tl["half"])
     df["ball_run_id"] = run_id
 
     say("[8/8] write + check")
+    change = report.compare_previous(os.path.join(out_dir, "frames.parquet"), df)
     outs = {
         "frames.parquet": df,
         "events.parquet": ev,
@@ -147,7 +155,9 @@ def build(data_dir=None, out_dir=C.CACHE_DIR, force_parse=False, quiet=False):
         path = os.path.join(out_dir, name)
         table.to_parquet(path, index=False)
         outputs[name] = (os.path.getsize(path), content_hash(table))
-    for name, arr in (("players_m.npy", p_o), ("ball_m.npy", b_o), ("slot_team.npy", slot_team)):
+    for name, arr in (("players_m.npy", p_o), ("players_meas.npy", pl["meas"]),
+                      ("players_team.npy", pl["team"]), ("players_keeper.npy", pl["keeper"]),
+                      ("ball_m.npy", b_o), ("slot_team.npy", slot_team)):
         path = os.path.join(out_dir, name)
         np.save(path, arr)
         outputs[name] = (os.path.getsize(path), hashlib.sha256(arr.tobytes()).hexdigest())
@@ -162,6 +172,7 @@ def build(data_dir=None, out_dir=C.CACHE_DIR, force_parse=False, quiet=False):
         "flips": flips, "ball_stats": ball_stats, "raw_ball_obs_graded": raw_obs_graded,
         "unknown_codes": unknown_codes, "inputs": inputs, "widths": widths,
         "outputs": outputs, "hygiene": hyg_stats, "event_noise": ev_noise,
+        "situations": sit_stats, "diagnostics": diag, "change": change,
     }
     ctx["checks"] = checks.run(ctx)
     ctx["runtime_s"] = time.time() - t0

@@ -5,4 +5,4 @@
 Nothing in this package reads any ground truth.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"

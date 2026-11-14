@@ -19,6 +19,9 @@ FPS = GAMES[GAME]["fps"]                       # 25
 N_FRAMES = GAMES[GAME]["n_video_frames"]       # 199319, the submission length
 PITCH_L, PITCH_W = GAMES[GAME]["pitch"]        # 105.3 x 68.0 m
 HALF_BLOCKS = half_video_blocks(GAME)          # [(1, 11185, 90651), (2, 110808, 190197)]
+# Published fact (FAQ.md): the second half is graded from 110,808 but kicks off at 113,742; the
+# 2,934 frames between are all dead ball. The first half is graded from its kickoff.
+KICKOFF_2ND = 113742
 
 # Reference figures quoted in DATA.md, used only as build checks (never as features)
 EXPECTED = {
@@ -42,10 +45,15 @@ IMAGE_W, IMAGE_H = 1920, 1080
 BALL_MAX_SPEED = 42.0          # m/s; hardest shots ~35-40 m/s. Faster implied motion = glitch
 INTERP_MAX_GAP = 10            # frames (0.4 s); longer gaps are left NaN, never invented
 VEL_HALF_WINDOW = 2            # frames each side for the centred ball-velocity estimate
-# The ball's third channel is labelled a speed in the XML but behaves like height in metres (no
-# correlation with speed from positions, 0-7 m, present ~10% of frames). Treated as height; the
-# report prints the evidence (its correlation with ball speed) on every build.
-BALL_AERIAL_Z = 2.0            # m; above head height the ball cannot be under foot control
+# The ball's third channel is labelled a speed in the XML, does not behave like one, and is present
+# even on frames with no ball position. Its meaning is unknown, so it is kept raw (ball_ch3) and
+# not turned into any feature (docs/PLAN.md D6).
+
+# ---- ball states (docs/PLAN.md D7): flagged, never deleted ------------------------------------
+BALL_STILL_LONG = 75           # frames (3 s) of a stationary ball: a restart being set up
+BALL_ISOLATED_R = 15.0         # m from every measured player ...
+BALL_ISOLATED_SPEED = 2.0      # ... while slower than this: spare ball or false detection
+BALL_ISOLATED_MIN = 13         # frames (0.5 s) sustained
 
 # ---- events (kick / touch candidates) ---------------------------------------------------------
 EVENT_SCALES = (3, 6, 12)      # frames before/after: 0.12 s, 0.24 s, 0.48 s. The ball track is
@@ -63,6 +71,12 @@ CONTACT_R = 1.5                # m; ball this close to its nearest player = in c
 CONTACT_MIN = 3                # frames; shorter contact runs are noise
 CONTACT_GAP_TOL = 2            # frames of interruption tolerated inside one contact run
 CONTROL_MIN = 12               # frames (0.48 s) of continuous same-team contact = controlled
+# A touch needs the ball to react (docs/PLAN.md D4): a ball flying past a player at speed is not a
+# contact. A contact run is kept if the ball stays close for CONTACT_HOLD frames, or if the ball's
+# velocity changes by at least CONTACT_REACT_DV across +-CONTACT_REACT_K frames inside the run.
+CONTACT_HOLD = 6               # frames (0.24 s)
+CONTACT_REACT_K = 3            # frames each side
+CONTACT_REACT_DV = 2.0         # m/s
 
 # ---- tracking hygiene -------------------------------------------------------------------------
 DUP_RADIUS = 1.0               # m; two same-team tracks closer than this are one person tracked twice
@@ -71,6 +85,58 @@ OFF_PITCH_M = 0.5              # m outside a line: "off the pitch" (a throw-in o
 FAR_OFF_M = 3.0                # m outside: not a participant (bench, warm-up, staff); dropped
 SLOT_VEL_K = 5                 # frames each side for per-track velocity
 SLOT_VEL_MAX = 12.0            # m/s; faster implied motion inside one slot = identity switch
+
+# ---- players (docs/PLAN.md D1-D3, P6, P8, P9) -------------------------------------------------
+# The ATD leaves a player's speed empty when the tracker did not see them and is holding or
+# predicting the position: every off-screen position has no speed, every position with a speed is
+# on screen. "Measured" = position and speed both present. Only measured players may be nearest to
+# the ball, in contact or in control; guessed positions are used for coarse team shape only.
+#
+# Keeper slots (P6): the tracker gives a goalkeeper detection to either keeper slot, whatever the
+# team (confirmed on video in both directions). A MEASURED keeper-slot track belongs to the team
+# defending the goal it stands at, if it is within KEEPER_GOAL_ZONE of that goal line, is the
+# deepest measured player towards it, and the penalty box holds fewer than KEEPER_BOX_CROWD other
+# measured players (a keeper who has gone up for a late corner stands in a crowded box).
+KEEPER_GOAL_ZONE = 25.0        # m from the goal line
+KEEPER_BOX_CROWD = 4           # other measured players inside that penalty box
+BOX_DEPTH, BOX_HALF_WIDTH = 16.5, 20.16    # m, penalty area
+# Per-frame keeper role (D3): the keeper-slot track if measured and on its own team's goal side,
+# else the team's deepest measured player inside its own penalty area.
+# Opposite-team duplicates (P9): the same object carrying both tags. Far tighter than marking or
+# shirt-pulling: closer than XDUP_DIST, relative speed below XDUP_RELV, sustained XDUP_MIN frames.
+# Never deleted (we cannot know which tag is wrong); ball attribution through such a pair is
+# neutral (contested).
+XDUP_DIST = 0.3                # m
+XDUP_RELV = 0.3                # m/s
+XDUP_MIN = 50                  # frames (2 s)
+PLAYER_VEL_K = 2               # frames each side for per-track velocity in the duplicate test
+PAIR_CHUNK = 5000              # frames per chunk for pairwise (46 x 46) computations
+
+# ---- situations (docs/PLAN.md P7, P10, D8, D9): dead-ball cues, graded frames only ------------
+SURPLUS_MIN = 75               # frames (3 s): more than 11 measured players of one team, sustained
+BLACKOUT_RATIO = 0.5           # measured players below half of their 10 s rolling median ...
+BLACKOUT_MIN = 5               # ... for at least this many frames
+BLACKOUT_ABS = 10              # or fewer than this many measured players at all ...
+BLACKOUT_ABS_MIN = 125         # ... for 5 s (a long loss the rolling median adapts to)
+CLUSTER_R = 5.0                # m: dense mixed cluster = at least CLUSTER_N people within CLUSTER_R
+CLUSTER_N = 8                  #    of one player,
+CLUSTER_MINORITY = 0.25        #    the smaller team at least this share of them,
+CLUSTER_SPEED = 1.5            #    their median speed below this (m/s),
+CLUSTER_MIN = 125              #    sustained 5 s (set-piece crowds)
+# Crowd (confrontations): looser than a set-piece crowd, and the tracker loses people inside it, so
+# it is measured as a SHARE of the tracked players, which occlusion does not shrink. At least
+# CROWD_SHARE of the tracked players within CROWD_R of one player, at least CROWD_MIN_TRACKED tracked,
+# both teams (CLUSTER_MINORITY), slow (CLUSTER_SPEED), sustained CROWD_MIN. CROWD_SHARE sits above the
+# 99th percentile reached in clearly live play over the whole match (0.63), with no labels involved.
+CROWD_R = 10.0                 # m
+CROWD_SHARE = 0.7
+CROWD_MIN_TRACKED = 8
+CROWD_MIN = 125                # frames (5 s)
+COOL_SPEED = 1.0               # m/s, players' 3 s mean speed: a long stoppage ...
+COOL_MAX_TRACKED = 12          # ... in which most players have disappeared from tracking ...
+COOL_TOUCHLINE = 20.0          # ... and those still visible are within this of a touchline ...
+COOL_MERGE = 375               # ... allowing 15 s interruptions ...
+COOL_MIN = 1500                # ... lasting at least 60 s: a cooling / drinks break
 
 # ---- dead-ball geometry -----------------------------------------------------------------------
 OOB_MARGIN = 0.5               # m beyond a line before the ball counts as out

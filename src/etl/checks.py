@@ -100,11 +100,18 @@ def run(ctx):
                   int((gk & (meta["slot_team"] == 0)).sum()) == 1 and
                   int((gk & (meta["slot_team"] == 1)).sum()) == 1,
                   "{} GK slots found".format(int(gk.sum()))))
-    bs = ctx["ball_stats"]
-    if "third_channel_corr_with_speed" in bs:
-        cr = bs["third_channel_corr_with_speed"]
-        r.append(_row("ball 3rd channel behaves like height, not speed", abs(cr) < 0.3 if cr == cr
-                      else True, "corr with speed {:.2f}".format(cr)))
+    hs = ctx["hygiene"]
+    share = hs["positions_measured"] / max(1, hs["positions_present"])
+    r.append(_row("players: most positions measured (speed present)", share > 0.8,
+                  "{:.1%} measured".format(share)))
+    kd = df["known_dead"].to_numpy()
+    r.append(_row("timeline: 2nd half graded before kickoff = 2934 frames (FAQ.md)",
+                  int(kd.sum()) == 2934 and bool(graded[kd].all()),
+                  "{} frames".format(int(kd.sum())), "FAIL"))
+    for col in ("contact_team", "control_team"):
+        bad = int(((df[col].to_numpy() != 0) & ~graded).sum())
+        r.append(_row("contacts only inside graded play: " + col, bad == 0,
+                      "{} frames outside".format(bad)))
     cx = ctx["cam_stats"]["corr_x_ball"]
     r.append(_row("camera: follows the ball along the pitch (corr > 0.5)", cx > 0.5,
                   "corr {:.2f}, median |dx| {:.1f} m".format(cx, ctx["cam_stats"]["abs_dx_p50"])))
