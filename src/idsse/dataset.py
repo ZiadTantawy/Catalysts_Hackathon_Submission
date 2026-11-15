@@ -53,10 +53,13 @@ def match_table(mid, level="realistic", seed=1, force=False):
         return pd.read_parquet(path)
     m = parse.load_match(mid, quiet=True)
     dead = m["status"] == 0
-    lv = LEVELS[level]
-    d = degrade.degrade(to_atd.clean_arrays(m), hazards(), dead, seed=seed,
-                        scale_loss=_scaled((0.5, 3.0), lv["loss"]),
-                        scale_regain=_scaled((2.5, 0.2), lv["regain"]))
+    if level == "clean":                                       # reference only: perfect tracking
+        d = to_atd.clean_arrays(m)
+    else:
+        lv = LEVELS[level]
+        d = degrade.degrade(to_atd.clean_arrays(m), hazards(), dead, seed=seed,
+                            scale_loss=_scaled((0.5, 3.0), lv["loss"]),
+                            scale_regain=_scaled((2.5, 0.2), lv["regain"]))
     df, _ = to_atd.build_frames(d)
     df["label"] = bench.variant_b_codes(mid, m).astype(np.int8)
     df["dead"] = dead
