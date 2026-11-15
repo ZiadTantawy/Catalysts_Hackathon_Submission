@@ -138,25 +138,38 @@ def heldout_loglik(df, kind, fit_mask, test_mask):
 
 # ---- simulation --------------------------------------------------------------------------------
 
-def simulate_seen(hz, sit, half, start_seen=True, seed=0, scale_loss=1.0, scale_regain=1.0):
-    """Frame-by-frame visibility from the hazards. sit: situation() of the CLEAN frames table, where
-    the ball is known everywhere. scale_* multiply the hazards' odds (mess levels)."""
-    rng = np.random.default_rng(seed)
-    n = len(half)
-    Xl = sit[LOSS_FEATURES].fillna(hz["loss"]["medians"])
-    p_loss = hz["loss"]["model"].predict_proba(Xl)[:, 1]
-    p_loss = _scale_odds(p_loss, scale_loss)
+def hazard_tables(hz, sit):
+    """Per-frame hazards for a situation table (the slow part, done once per match):
+    p_loss [T], and p_regain on a grid of gap ages [A, T] plus the age -> grid row lookup."""
+    n = len(sit)
+    p_loss = hz["loss"]["model"].predict_proba(sit[LOSS_FEATURES].fillna(hz["loss"]["medians"]))[:, 1]
     # the regain hazard also depends on the gap's age, known only during the run: precompute it for
     # every frame on a grid of ages (dense for the first 2 s, log-spaced up to 60 s) and look it up
     reg_cols = [c for c in REGAIN_FEATURES if c != "log_gap_s"]
     Xr = sit[reg_cols].fillna(hz["regain"]["medians"]).to_numpy()
     ages = np.unique(np.r_[np.arange(1, 50), np.round(np.geomspace(50, 60 * FPS, 40))]).astype(int)
     grid = np.empty((len(ages), n), np.float32)
-    model = hz["regain"]["model"]
     for k, a in enumerate(ages):
         Xa = pd.DataFrame(np.c_[np.full(n, np.log1p(a / FPS)), Xr], columns=REGAIN_FEATURES)
-        grid[k] = _scale_odds(model.predict_proba(Xa)[:, 1], scale_regain)
+        grid[k] = hz["regain"]["model"].predict_proba(Xa)[:, 1]
     age_idx = np.searchsorted(ages, np.arange(int(ages[-1]) + 1)).clip(0, len(ages) - 1)
+    return {"p_loss": p_loss, "grid": grid, "age_idx": age_idx}
+
+
+def simulate_seen(hz, sit, half, start_seen=True, seed=0, scale_loss=1.0, scale_regain=1.0,
+                  dead=None, tables=None):
+    """Frame-by-frame visibility from the hazards. sit: situation() of the frames table with the true
+    ball (known everywhere). scale_* multiply the hazards' odds: a number, or a pair (live, dead)
+    applied per frame by the `dead` mask (IDSSE's BallStatus), which lets the simulation match how
+    BAR-ATH's ball loss splits between live play and stoppages."""
+    rng = np.random.default_rng(seed)
+    n = len(half)
+    tb = tables or hazard_tables(hz, sit)
+    dead = np.zeros(n, bool) if dead is None else dead
+    s_loss = _per_frame(scale_loss, dead)
+    s_reg = _per_frame(scale_regain, dead)
+    p_loss = _scale_odds(tb["p_loss"], s_loss)
+    grid, age_idx = tb["grid"], tb["age_idx"]
 
     u = rng.random(n)
     seen = np.ones(n, bool)
@@ -170,14 +183,20 @@ def simulate_seen(hz, sit, half, start_seen=True, seed=0, scale_loss=1.0, scale_
             age = 0 if seen[i] else 1
         else:
             p = grid[age_idx[min(age, len(age_idx) - 1)], i - 1]
+            if s_reg[i - 1] != 1.0:
+                o = p / (1 - p) * s_reg[i - 1]
+                p = o / (1 + o)
             seen[i] = u[i] < p
             age = 0 if seen[i] else age + 1
     return seen
 
 
+def _per_frame(scale, dead):
+    live_s, dead_s = scale if isinstance(scale, (tuple, list)) else (scale, scale)
+    return np.where(dead, dead_s, live_s).astype(np.float64)
+
+
 def _scale_odds(p, s):
-    if s == 1.0:
-        return p
     o = p / (1 - p) * s
     return o / (1 + o)
 
@@ -296,10 +315,14 @@ def player_stats(atd):
 
 # ---- both together ---------------------------------------------------------------------------------
 
-def degrade(atd, hz, seed=0, scale_loss=1.0, scale_regain=0.7, **player_kw):
+def degrade(atd, hz, dead, seed=0, scale_loss=(0.5, 3.0), scale_regain=(2.5, 0.2), **player_kw):
     """Players first, then the ball: the ball hazards read player-based inputs (players around the
     ball, their speed), which on BAR-ATH come from degraded tracking, so they must be degraded on IDSSE
     too before the hazards are applied.
+
+    dead: IDSSE's BallStatus == 0 per frame. The hazards' odds are scaled separately in live play and
+    in stoppages (scale_* = (live, dead)), fitted so the ball is missing on ~80% of dead and ~11% of
+    live frames, as on BAR-ATH by its own dead-ball detector (no labels; 2026-11-15: 79.7% / 11.2%).
 
     Not done: hiding the ball whenever it leaves the virtual camera's view. The real camera keeps the
     ball in view (99.9% of frames where it is known); the virtual one follows the players more than
@@ -308,7 +331,7 @@ def degrade(atd, hz, seed=0, scale_loss=1.0, scale_regain=0.7, **player_kw):
     d = degrade_players(atd, seed=seed, **player_kw)
     df, _ = to_atd.build_frames(d)
     seen = simulate_seen(hz, situation(df, np.ones(len(df), bool)), d["half"], seed=seed,
-                         scale_loss=scale_loss, scale_regain=scale_regain)
+                         scale_loss=scale_loss, scale_regain=scale_regain, dead=dead)
     b = d["ball"]
     ball_out = b.copy()
     ball_out[~seen] = np.nan
