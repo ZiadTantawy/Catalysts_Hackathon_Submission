@@ -61,11 +61,17 @@ __pycache__/
 .venv/
 venv/
 env/
+.jupyter/
 .DS_Store
 
 # -- team additions ----------------------------------------------------------------------------
 # Public datasets from other matches are downloaded locally, never committed.
 external-data/
 outputs/
-cache/
 .ipynb_checkpoints/
+
+# -- ETL output (src/etl) and IDSSE caches (src/idsse) ----------------------------------------
+# Frame-level exports reconstruct the licensed data: never commit them. report.txt is safe to
+# share but lives here too, so it is regenerated rather than stale.
+cache/
+tests/out/
