@@ -8,7 +8,7 @@ So this module never computes a feature itself. It reproduces stages 3-7 of src/
 the same functions, with three IDSSE-specific inputs where build.py reads BAR-ATH files:
 
 - timeline: every IDSSE frame is "graded" (the tracked halves are play, pre-match is not included);
-- camera: a virtual camera (`virtual_camera`), since IDSSE has no video or homography;
+- camera: a virtual camera (src/idsse/camera.py), since IDSSE has no video or homography;
 - tagging: none, so the tagging columns exist with their neutral values (models must not use them).
 
 `situations.compute` marks BAR-ATH's published pre-kickoff stretch of the 2nd half as known dead
@@ -21,13 +21,12 @@ ATD layout (what src/etl/io_atd.py + orient.to_metres produce before orientation
     slot_team [46]      0 home / 1 away;  slot_is_gk [46]
 """
 
-import warnings
-
 import numpy as np
 import pandas as pd
 
 from ..etl import ball, features, io_tagging, orient, players, situations
 from ..etl import config as C
+from . import camera
 
 N_SLOTS = 46
 DFL_L, DFL_W = 105.0, 68.0
@@ -54,54 +53,11 @@ def clean_arrays(m):
     slot_is_gk[:P] = m["person_gk"]
     atd = {"players": p, "ball": b, "slot_team": slot_team, "slot_is_gk": slot_is_gk,
            "half": m["half"].astype(np.int8)}
-    atd["cam"] = virtual_camera(atd)
+    # where the virtual camera points is decided once, from the true positions; what it sees is
+    # recomputed from whatever positions atd holds when the frames are built (camera.features)
+    atd["cam_track"] = camera.track(p, b, slot_team, atd["half"])
+    atd["height_factor"] = 1.0   # fitted with degrade.degrade_players to BAR-ATH's off-screen share
     return atd
-
-
-def virtual_camera(atd, width_m=62.4, smooth_s=1.0, follow_ball=0.5, follow_y=0.2):
-    """A tactical camera from the tracking itself, in the same units as io_homography.camera_features
-    (centre normalised 0-1, unoriented). Centre x follows a mix of the ball and the players' mean x,
-    centre y stays near the middle; both smoothed. Defaults from BAR-ATH's cache/report.txt: view
-    width p50 62.4 m; camera x correlates 0.95 with the team blocks and 0.83 with the ball; camera y
-    hardly follows the ball (corr 0.18). A position is on screen when inside the view; the view's
-    height is the pitch-width share the tactical camera covers at that zoom (~0.65 of its width)."""
-    p, b = atd["players"], atd["ball"]
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)     # frames with nobody tracked
-        px = np.nanmean(p[..., 0], axis=1)
-    px = np.where(np.isfinite(px), px, C.PITCH_L / 2)
-    bx = np.where(np.isfinite(b[:, 0]), b[:, 0], px)
-    by = np.where(np.isfinite(b[:, 1]), b[:, 1], C.PITCH_W / 2)
-    cx = follow_ball * bx + (1 - follow_ball) * px
-    cy = follow_y * by + (1 - follow_y) * C.PITCH_W / 2
-    k = max(int(smooth_s * C.FPS), 1)
-    cx = pd.Series(cx).groupby(atd["half"]).transform(lambda s: s.ewm(span=k).mean()).to_numpy()
-    cy = pd.Series(cy).groupby(atd["half"]).transform(lambda s: s.ewm(span=k).mean()).to_numpy()
-    cx = np.clip(cx, width_m / 2, C.PITCH_L - width_m / 2)
-
-    half_w, half_h = width_m / 2, 0.65 * width_m / 2
-    tracked = np.isfinite(p[..., 0])
-    on = tracked & (np.abs(p[..., 0] - cx[:, None]) <= half_w) & (np.abs(p[..., 1] - cy[:, None]) <= half_h)
-    n_tr = tracked.sum(1)
-    b_known = np.isfinite(b[:, 0])
-    b_on = np.full(len(b), -1, np.int8)
-    b_on[b_known] = ((np.abs(b[b_known, 0] - cx[b_known]) <= half_w)
-                     & (np.abs(b[b_known, 1] - cy[b_known]) <= half_h)).astype(np.int8)
-    pan = np.full(len(cx), np.nan)
-    j = 5
-    pan[j:-j] = np.hypot(cx[2 * j:] - cx[:-2 * j], cy[2 * j:] - cy[:-2 * j]) / (2 * j / C.FPS)
-    return {
-        "cam_cx_n": (cx / C.PITCH_L).astype(np.float32),
-        "cam_cy_n": (cy / C.PITCH_W).astype(np.float32),
-        "cam_view_width_m": np.full(len(cx), width_m, np.float32),
-        "cam_pan_speed": pan.astype(np.float32),
-        "cam_reproj_error": np.zeros(len(cx), np.float32),
-        "n_on_screen": on.sum(1).astype(np.int8),
-        "frac_tracked_off_screen": np.where(n_tr > 0, 1 - on.sum(1) / np.maximum(n_tr, 1),
-                                            np.nan).astype(np.float32),
-        "ball_on_screen": b_on,
-        "_on_screen": on,          # per position, for the degrader; dropped before the frames table
-    }
 
 
 def timeline(half):
@@ -124,7 +80,7 @@ def build_frames(atd):
     half = atd["half"]
     n = len(half)
     tl = timeline(half)
-    cam = {k: v for k, v in atd["cam"].items() if not k.startswith("_")}
+    cam = camera.features(atd["players"], atd["ball"], *atd["cam_track"], atd["height_factor"])
 
     flips = orient.detect_flips(atd["players"], atd["slot_team"], half)
     p_o, b_o, flip_frame = orient.apply_orientation(atd["players"], atd["ball"], tl["phase"], flips)

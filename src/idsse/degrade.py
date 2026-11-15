@@ -25,7 +25,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import SplineTransformer, StandardScaler
 
 from ..etl import config as C
-from . import parse
+from . import camera, parse
 
 FPS = C.FPS
 
@@ -180,6 +180,139 @@ def _scale_odds(p, s):
         return p
     o = p / (1 - p) * s
     return o / (1 + o)
+
+
+# ---- part 2: players (rules, tuned to BAR-ATH's aggregates) --------------------------------------
+#
+# What the ATD does (docs/PLAN.md, cache/report.txt): a player is measured (speed present) only when
+# the camera sees them; otherwise the tracker holds the last position with no speed, and after a while
+# drops the track. Players hidden behind others on screen are also unmeasured for a moment. A track
+# that comes back gets a new slot (46 slots for 22 players over a match). Targets on graded frames:
+# 10.14 / 10.11 tracked per team, 9.27 / 9.48 measured per team, 5.0% of tracked players off screen.
+
+N_HOME_SLOTS, N_AWAY_SLOTS = 24, 22          # BAR-ATH's slot layout
+
+
+def _nearest_other(X, Y, chunk=5000):
+    """Distance from each present position to the nearest other present position, per frame."""
+    out = np.full(X.shape, np.inf, np.float32)
+    for s in range(0, len(X), chunk):
+        x, y = X[s:s + chunk], Y[s:s + chunk]
+        d = np.hypot(x[:, :, None] - x[:, None, :], y[:, :, None] - y[:, None, :])
+        d[:, np.arange(x.shape[1]), np.arange(x.shape[1])] = np.inf
+        out[s:s + chunk] = np.nanmin(np.where(np.isfinite(d), d, np.inf), axis=2)
+    return out
+
+
+def _last_index(mask, half):
+    """Index of the last True at or before each frame within the same half, -1 if none."""
+    frame = np.arange(len(mask)).reshape(-1, *[1] * (mask.ndim - 1))
+    idx = np.where(mask, frame, -1)
+    starts = np.r_[0, np.flatnonzero(half[1:] != half[:-1]) + 1, len(half)]
+    for a, b in zip(starts[:-1], starts[1:]):
+        idx[a:b] = np.maximum.accumulate(idx[a:b], axis=0)
+    return idx
+
+
+def _hold_limits(unmeas, half, rng, short_s, p_long, long_s):
+    """Per position: how many frames into its unmeasured run the tracker still holds it. Each run gets
+    its own limit: usually short (exponential, mean short_s), sometimes long (uniform up to long_s)."""
+    lim = np.zeros(unmeas.shape, np.int32)
+    starts = np.r_[0, np.flatnonzero(half[1:] != half[:-1]) + 1, len(half)]
+    for h0, h1 in zip(starts[:-1], starts[1:]):                # runs never cross half-time
+        for j in range(unmeas.shape[1]):
+            d = np.diff(np.r_[False, unmeas[h0:h1, j], False].astype(np.int8))
+            for a, b in zip(np.flatnonzero(d == 1) + h0, np.flatnonzero(d == -1) + h0):
+                s = rng.uniform(20, long_s) if rng.random() < p_long else rng.exponential(short_s)
+                lim[a:b, j] = int(s * FPS)
+    return lim
+
+
+def degrade_players(atd, short_s=2.0, p_long=0.0, long_s=120.0, occ_r=1.0, height_factor=None,
+                    keeper_ghosts=True, fragment=True, seed=0):
+    """Camera-limited measurement, held positions, dropped tracks and new slots. Returns a new atd."""
+    rng = np.random.default_rng(seed)
+    p = atd["players"]
+    half = atd["half"]
+    cx, cy, w = atd["cam_track"]
+    hf = atd["height_factor"] if height_factor is None else height_factor
+    X, Y, S = p[..., 0], p[..., 1], p[..., 2]
+    present = np.isfinite(X)
+    on = present & camera.in_view(X, Y, cx[:, None], cy[:, None], w[:, None], hf)
+    meas = on & (_nearest_other(X, Y) >= occ_r)
+
+    last = _last_index(meas, half)                             # [T, S]
+    rows = np.arange(len(X))[:, None]
+    age = rows - last
+    limit = _hold_limits(present & ~meas, half, rng, short_s, p_long, long_s)
+    if keeper_ghosts:   # the ATD keeps unmeasured keeper-slot positions for minutes (P6 "ghosts")
+        limit[:, atd["slot_is_gk"]] = np.iinfo(np.int32).max
+    held = present & ~meas & (last >= 0) & (age <= limit)
+    safe = np.where(last >= 0, last, 0)
+    cols = np.arange(X.shape[1])[None, :]
+    Xo = np.where(meas, X, np.where(held, X[safe, cols], np.nan))
+    Yo = np.where(meas, Y, np.where(held, Y[safe, cols], np.nan))
+    So = np.where(meas, S, np.nan)
+
+    slot_team = np.r_[np.zeros(N_HOME_SLOTS, np.int64), np.ones(N_AWAY_SLOTS, np.int64)]
+    out = np.full((len(X), len(slot_team), 3), np.nan, np.float32)
+    slot_is_gk = np.zeros(len(slot_team), bool)
+    for t, pool in ((0, np.arange(N_HOME_SLOTS)), (1, N_HOME_SLOTS + np.arange(N_AWAY_SLOTS))):
+        segs = []                                              # (start, end, source column)
+        for j in np.flatnonzero(atd["slot_team"] == t):
+            tr = np.isfinite(Xo[:, j])
+            if not tr.any():
+                continue
+            d = np.diff(np.r_[False, tr, False].astype(np.int8))
+            st, en = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+            if not fragment:                                   # one slot per person
+                st, en = st[:1], en[-1:]
+            segs += [(a, b, j) for a, b in zip(st, en)]
+        free_at = {s: -1 for s in pool}
+        for a, b, j in sorted(segs):
+            s = min((s for s in pool if free_at[s] <= a), key=lambda s: free_at[s], default=None)
+            if s is None:                                      # more tracks than slots: drop it
+                continue
+            out[a:b, s, 0], out[a:b, s, 1], out[a:b, s, 2] = Xo[a:b, j], Yo[a:b, j], So[a:b, j]
+            free_at[s] = b
+            if atd["slot_is_gk"][j] and not slot_is_gk[pool].any():
+                slot_is_gk[s] = True
+    return {**atd, "players": out, "slot_team": slot_team, "slot_is_gk": slot_is_gk, "height_factor": hf}
+
+
+def player_stats(atd):
+    """Tracked / measured players per team and share of tracked players off screen (all frames)."""
+    p, t = atd["players"], atd["slot_team"]
+    tracked = np.isfinite(p[..., 0])
+    meas = tracked & np.isfinite(p[..., 2])
+    cam = camera.features(p, atd["ball"], *atd["cam_track"], atd["height_factor"])
+    return {"tracked_home": round(float(tracked[:, t == 0].sum(1).mean()), 2),
+            "tracked_away": round(float(tracked[:, t == 1].sum(1).mean()), 2),
+            "measured_home": round(float(meas[:, t == 0].sum(1).mean()), 2),
+            "measured_away": round(float(meas[:, t == 1].sum(1).mean()), 2),
+            "measured_%": round(100 * float(meas.sum() / max(tracked.sum(), 1)), 1),
+            "off_screen_%": round(100 * float(np.nanmean(cam["frac_tracked_off_screen"])), 1)}
+
+
+# ---- both together ---------------------------------------------------------------------------------
+
+def degrade(atd, hz, seed=0, scale_loss=1.0, scale_regain=0.7, **player_kw):
+    """Players first, then the ball: the ball hazards read player-based inputs (players around the
+    ball, their speed), which on BAR-ATH come from degraded tracking, so they must be degraded on IDSSE
+    too before the hazards are applied.
+
+    Not done: hiding the ball whenever it leaves the virtual camera's view. The real camera keeps the
+    ball in view (99.9% of frames where it is known); the virtual one follows the players more than
+    the ball, so that rule doubled the number of gaps (tested 2026-11-15)."""
+    from . import to_atd                                       # to_atd imports camera, not degrade
+    d = degrade_players(atd, seed=seed, **player_kw)
+    df, _ = to_atd.build_frames(d)
+    seen = simulate_seen(hz, situation(df, np.ones(len(df), bool)), d["half"], seed=seed,
+                         scale_loss=scale_loss, scale_regain=scale_regain)
+    b = d["ball"]
+    ball_out = b.copy()
+    ball_out[~seen] = np.nan
+    return {**d, "ball": ball_out, "seen": seen}
 
 
 # ---- statistics (the calibration targets) --------------------------------------------------------
