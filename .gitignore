@@ -67,4 +67,5 @@ env/
 # Public datasets from other matches are downloaded locally, never committed.
 external-data/
 outputs/
+cache/
 .ipynb_checkpoints/
