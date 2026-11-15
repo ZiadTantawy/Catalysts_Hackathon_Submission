@@ -31,7 +31,9 @@ LABEL_COLUMNS = ["label", "dead", "match", "level", "seed"]
 EXCLUDE_PREFIXES = ("tag_", "cam_", "setpiece", "frames_since_setpiece", "frames_until_setpiece",
                     "next_setpiece", "frames_since_goal_tag")
 EXCLUDE = {"frame", "half", "phase", "graded", "t_half_s", "rotated", "known_dead", "ball_ch3",
-           "ball_run_id", "n_on_screen", "frac_tracked_off_screen", "ball_on_screen"}
+           "ball_run_id", "n_on_screen", "frac_tracked_off_screen", "ball_on_screen",
+           # safety net against DFL's frozen dead ball (degrade.py part 3): the ball-stillness flags
+           "ball_stationary", "ball_still_long"}
 
 _HZ = None
 

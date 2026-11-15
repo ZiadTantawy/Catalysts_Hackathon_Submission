@@ -320,6 +320,69 @@ def player_stats(atd):
             "off_screen_%": round(100 * float(np.nanmean(cam["frac_tracked_off_screen"])), 1)}
 
 
+# ---- part 3: recording habits of DFL that BAR-ATH does not have ------------------------------------
+#
+# Measured 2026-11-15 (live play, second difference of positions, p50 / p90 / p99):
+#   BAR-ATH players 0.1 / 0.4 / 1.0 cm, ball 0.9 / 2.9 / 5.9 cm  (the provider smooths its tracks)
+#   IDSSE   players 1.0 / 2.2 / 2.8 cm, ball 2-3 / 6-16 / 48-97 cm
+# and DFL freezes the ball where play stopped for the whole stoppage (100% of dead frames, <1% of live),
+# then moves it to the restart spot in one frame (p50 6.4 m, p90 24 m). On BAR-ATH the ball keeps
+# moving in most stoppages (visible dead frames: stationary 24%, still >= 3 s 16%, speed p50 1.8 m/s).
+
+def _nan_gaussian(a, sigma, half):
+    """Gaussian smoothing along time that ignores NaN and never crosses half-time."""
+    from scipy.ndimage import gaussian_filter1d
+    out = np.array(a, dtype=np.float64, copy=True)
+    starts = np.r_[0, np.flatnonzero(half[1:] != half[:-1]) + 1, len(half)]
+    for s, e in zip(starts[:-1], starts[1:]):
+        v = out[s:e]
+        ok = np.isfinite(v)
+        num = gaussian_filter1d(np.where(ok, v, 0.0), sigma, axis=0, mode="nearest")
+        den = gaussian_filter1d(ok.astype(np.float64), sigma, axis=0, mode="nearest")
+        out[s:e] = np.where(ok, num / np.maximum(den, 1e-9), np.nan)
+    return out.astype(np.float32)
+
+
+def smooth_tracks(atd, sigma_players=3.0, sigma_ball=6.0):
+    """Smooth positions like BAR-ATH's provider (sigmas in frames); speeds recomputed are left as given."""
+    p = atd["players"].copy()
+    b = atd["ball"].copy()
+    h = atd["half"]
+    p[..., 0] = _nan_gaussian(p[..., 0], sigma_players, h)
+    p[..., 1] = _nan_gaussian(p[..., 1], sigma_players, h)
+    b[:, 0] = _nan_gaussian(b[:, 0], sigma_ball, h)
+    b[:, 1] = _nan_gaussian(b[:, 1], sigma_ball, h)
+    return {**atd, "players": p, "ball": b}
+
+
+def move_dead_ball(atd, dead, seed=0, wander_m=4.0, pause_s=(1.5, 7.0)):
+    """Replace DFL's frozen dead ball: inside each stoppage the ball travels smoothly from where play
+    stopped to where it restarts (as if rolled on, collected and carried), wandering up to ~wander_m
+    on the way, then rests for a pause before the restart (a set piece being set up)."""
+    rng = np.random.default_rng(seed)
+    b = atd["ball"].copy()
+    half = atd["half"]
+    d = np.diff(np.r_[False, dead, False].astype(np.int8))
+    for a, e in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1)):
+        if e >= len(b) or half[e] != half[a] or not np.isfinite(b[[a, e], 0]).all():
+            continue                                           # stoppage running into half-time
+        n = e - a
+        p0, p1 = b[a, :2].astype(np.float64), b[e, :2].astype(np.float64)
+        pause = min(int(rng.uniform(*pause_s) * FPS), n // 3)
+        m = n - pause
+        s = np.linspace(0.0, 1.0, m)
+        ease = s * s * (3 - 2 * s)                             # starts and ends slowly
+        path = p0 + ease[:, None] * (p1 - p0)
+        if m > 2 * FPS:                                        # a long stoppage: the ball wanders
+            k = rng.normal(size=(m, 2)).cumsum(0)
+            k -= np.linspace(0, 1, m)[:, None] * k[-1]         # random walk tied down at both ends
+            k *= wander_m / max(np.abs(k).max(), 1e-6) * np.sin(np.pi * s)[:, None]
+            path = path + k
+        b[a:a + m, :2] = path
+        b[a + m:e, :2] = p1
+    return {**atd, "ball": b}
+
+
 # ---- both together ---------------------------------------------------------------------------------
 
 def degrade(atd, hz, dead, seed=0, scale_loss=(0.5, 3.0), scale_regain=(2.5, 0.2), **player_kw):
@@ -331,10 +394,14 @@ def degrade(atd, hz, dead, seed=0, scale_loss=(0.5, 3.0), scale_regain=(2.5, 0.2
     in stoppages (scale_* = (live, dead)), fitted so the ball is missing on ~80% of dead and ~11% of
     live frames, as on BAR-ATH by its own dead-ball detector (no labels; 2026-11-15: 79.7% / 11.2%).
 
+    Before anything else, DFL's recording habits are undone (part 3): tracks are smoothed like
+    BAR-ATH's and the frozen dead ball is made to move.
+
     Not done: hiding the ball whenever it leaves the virtual camera's view. The real camera keeps the
     ball in view (99.9% of frames where it is known); the virtual one follows the players more than
     the ball, so that rule doubled the number of gaps (tested 2026-11-15)."""
     from . import to_atd                                       # to_atd imports camera, not degrade
+    atd = move_dead_ball(smooth_tracks(atd), dead, seed=seed)  # DFL habits first (part 3)
     d = degrade_players(atd, seed=seed, **player_kw)
     df, _ = to_atd.build_frames(d)
     seen = simulate_seen(hz, situation(df, np.ones(len(df), bool)), d["half"], seed=seed,
