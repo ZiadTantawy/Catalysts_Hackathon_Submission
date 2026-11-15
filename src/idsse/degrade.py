@@ -276,26 +276,33 @@ def degrade_players(atd, short_s=2.0, p_long=0.0, long_s=120.0, occ_r=1.0, heigh
     slot_team = np.r_[np.zeros(N_HOME_SLOTS, np.int64), np.ones(N_AWAY_SLOTS, np.int64)]
     out = np.full((len(X), len(slot_team), 3), np.nan, np.float32)
     slot_is_gk = np.zeros(len(slot_team), bool)
+    # Keepers keep one reserved keeper slot per team that nobody else uses: the ATD's keeper slots carry
+    # keepers (sometimes of the wrong team, which the ETL's P6 correction handles), never an outfield
+    # player far up the pitch. Reusing it for outfield tracks was the top giveaway in the
+    # adversarial check (2026-11-15).
     for t, pool in ((0, np.arange(N_HOME_SLOTS)), (1, N_HOME_SLOTS + np.arange(N_AWAY_SLOTS))):
+        gk_slot, field_pool = pool[0], pool[1:]
+        slot_is_gk[gk_slot] = True
         segs = []                                              # (start, end, source column)
         for j in np.flatnonzero(atd["slot_team"] == t):
             tr = np.isfinite(Xo[:, j])
             if not tr.any():
+                continue
+            if atd["slot_is_gk"][j]:
+                out[tr, gk_slot, 0], out[tr, gk_slot, 1], out[tr, gk_slot, 2] = Xo[tr, j], Yo[tr, j], So[tr, j]
                 continue
             d = np.diff(np.r_[False, tr, False].astype(np.int8))
             st, en = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
             if not fragment:                                   # one slot per person
                 st, en = st[:1], en[-1:]
             segs += [(a, b, j) for a, b in zip(st, en)]
-        free_at = {s: -1 for s in pool}
+        free_at = {s: -1 for s in field_pool}
         for a, b, j in sorted(segs):
-            s = min((s for s in pool if free_at[s] <= a), key=lambda s: free_at[s], default=None)
+            s = min((s for s in field_pool if free_at[s] <= a), key=lambda s: free_at[s], default=None)
             if s is None:                                      # more tracks than slots: drop it
                 continue
             out[a:b, s, 0], out[a:b, s, 1], out[a:b, s, 2] = Xo[a:b, j], Yo[a:b, j], So[a:b, j]
             free_at[s] = b
-            if atd["slot_is_gk"][j] and not slot_is_gk[pool].any():
-                slot_is_gk[s] = True
     return {**atd, "players": out, "slot_team": slot_team, "slot_is_gk": slot_is_gk, "height_factor": hf}
 
 
