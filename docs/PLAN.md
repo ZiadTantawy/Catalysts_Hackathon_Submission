@@ -134,7 +134,7 @@ then lost, inside a `GOALS` tag, dead until the kickoff.
 | Deterministic | | yes |
 
 Sample checks on video (debugging the rules on samples; small timing errors accepted, confirmed
-with the organisers as fine): restarts R1 exact, R2 −1 s, R6 −2 s, R3 −12 s; before fixing two
+with the organisers as fine): restarts R1 exact, R5 exact, R2 −1 s, R4 −1 s, R6 −2 s, R3 −12 s; before fixing two
 restart-detection bugs they were 21–36 s late. Still likely: some short stoppages missed (87 against a
 typical 100–130), and some stoppages start early (R6 detected 1:22:19, real 1:22:30).
 
@@ -226,6 +226,6 @@ Watching to understand the data, not to label it. Times are on the tactical vide
 | Ball out at 1:52:37 (Athletic's half) | Not detected as a crossing: ball last seen 5 m from the touchline, then lost |
 | Collective slowdowns B1–B8 | Real stoppages in 7 (fouls, B3 ball out for a Barça goal kick, B4 out in Athletic's half off camera, B7 ball hit the referee). B2 was a false slowdown (no collective slowdown on video), harmless only because it lies inside the stoppage after goal 1 |
 | Keeper with a still ball C1–C5 | C3 dead (foul whistled at 0:45:03 before the keeper had the ball), C5 dead (goal kick); C1, C2, C4 live: keeper held the ball in open play, then dropped it to his feet or threw it |
-| Restart times R1–R6 | R1 0:21:25, R2 0:34:05, R3 0:45:25, R6 stoppage 1:22:30 restart 1:22:32; R4 (0:51:54) a real foul stoppage |
+| Restart times R1–R6 | R1 0:21:25, R2 0:34:05, R3 0:45:25, R4 (foul from 0:51:54) 0:52:37, R5 (ball out 1:20:18) 1:20:28, R6 stoppage 1:22:30 restart 1:22:32 |
 | Dense-cluster candidates (D9): 0:30:51, 0:38:01–0:38:18, 1:30:43, 1:37:33 | Free kick, corner, corner, free kick: all dead ball; only the first carried a set-piece tag |
 | Cooling-break candidates (D9): flags 0:39:12–0:40:44 and 1:46:18–1:47:25 | Both are cooling breaks. First stoppage exactly: whistle 0:38:38, play back 0:41:35 (177 s); the flag marks the break itself, the detector must extend it to the whistle and the restart |
