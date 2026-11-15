@@ -73,6 +73,74 @@ fast outside the pitch · camera jumps and high reprojection error.
 Correction counters: keeper-slot team changes (P6), opposite-team duplicate pairs neutralised (P9),
 gaps not bridged (D5), and how often the nearest-team answer changed versus the previous build.
 
+## Dead-ball detector: rules (agreed 2026-11-15)
+
+Evidence, not rules on frames: each situation adds evidence for dead or live, and the detector picks
+the most likely sequence over time, so a stoppage lasts until play restarts. Fixed regardless of
+evidence: the 2nd half before kickoff is dead (FAQ.md), ungraded frames are `X`. There is no whistle
+in the data; the onset is taken from what follows it.
+
+**How the ball goes dead (onset)**
+
+| Situation | What the data shows | Onset |
+|---|---|---|
+| Ball over the touchline / goal line | `exit` event (44 in graded play, all 8 sampled were correct). The ball usually stays visible after going out | The crossing frame |
+| Ball out but the crossing not seen (1:52:37; B4) | Ball last seen near a line, moving towards it, then lost; no crossing event | The last sighting |
+| Goal | A fast ball heading for the goal vanishes in or near the box (goal 1: 16 m/s, seen 10 m out at 0:31:06.8, gone at 0:31:07 = the goal). Inside a `GOALS` tag, followed by a long stoppage and a kickoff | The vanishing frame. The `GOALS` tag start is the start of the attack (or the penalty run-up), never the goal |
+| Foul, offside, ball hits the referee, injury | Sudden collective slowdown with the ball on the pitch: 7 of 8 candidates were real stoppages; the 8th was a false slowdown that happened to fall inside a post-goal stoppage | Start of the slowdown, confirmed by what follows (still ball, crowd, wall, long slow period) |
+| Argument, cooling break, substitution, end of half | Existing cues (`crowd`, `cooling_break`, `h_/a_surplus`, `track_blackout`) | Start of the cue, or of the slowdown before it |
+
+**How play restarts (end)**: the ball still at a set spot, then a kick, then collective
+acceleration. Kickoff (centre spot, both teams in their own halves, kickoff tag), throw-in (ball
+re-enters from outside), corner (corner arc, crowd in the box), goal kick (6-yard box, keeper,
+opponents out of the box), free kick (foul spot, wall), **dropped ball** (after the ball hits the
+referee: ball still between two players or given back to a keeper), or, unseen, the collective
+acceleration itself. Who gets the ball after a restart is decided in the possession step.
+
+**Traps**
+
+| Looks | Is | Decided by |
+|---|---|---|
+| Keeper holding the ball, ball still ≥ 2 s | Live in open play, **or** dead (2 of 5 checked: a foul whistled before he had it, a goal kick) | What came before: ball out over the goal line = goal kick (dead); collective slowdown = foul (dead); neither = live |
+| Slow build-up, ball hidden in a duel or in the air, ball rolling along a line, advantage played | Live | No onset event and no restart picture: a brief slowdown or a short gap is not enough |
+| Ball moving after the whistle (kicked away, spare ball, ball boy) | Dead | Already dead until a restart picture; `ball_isolated` / ball moving outside the pitch |
+| Quick throw-in or free kick | Dead for 2–5 s | The crossing still marks the onset; no long minimum dead-ball length |
+
+Players running on for 1–2 s after a whistle is rare and gets no special handling.
+
+**Tags are evidence, never truth.** The `GOALS` tag at 0:38:11 is false (an offside, then a cooling
+break; a player shot into the goal while the ball was dead), and so is its `Kick Off (After Goal)` at
+0:41:20. A goal tag counts only when the data agrees (ball vanishing near the goal, long stoppage).
+Real kickoffs show 91–100% of each team in its own half; the false one 80%, too weak to rely on
+alone. Smart Tagging has no cooling-break code; the `cooling_break` cue covers it.
+
+## Dead-ball detector: status (`python -m src.model.deadball`, < 1 s)
+
+Per-frame evidence from the rules above, decoded per half with a switching cost. Implemented
+beyond the first version, each from an agreed rule: players' speed from measured players only (a
+panning camera freezes guessed positions and would fake a slowdown); a confirmed sudden collective
+slowdown starts a stoppage (foul, offside, ball hitting the referee); a ball over a line or a
+confirmed slowdown is held dead until a restart picture (everyone accelerating, the ball moving inside
+the pitch with a touch, the ball coming back on, a kickoff); any restart picture ends a hold, so clear
+live play always wins. Goals: ball seen behind the goal line near the goal, or last seen in a box and
+then lost, inside a `GOALS` tag, dead until the kickoff.
+
+| Whole-match check (no labels) | First version | Now |
+|---|---|---|
+| Stoppages (typical match ~100–130) | 80 | 87 |
+| Ball in play (typical ~52–58 min) | 57.0 min | 60.3 min |
+| Clearly live play called dead | 5.56% | 0.09% |
+| Ball over a line followed by dead | 40 of 44 | 43 of 44 |
+| Deterministic | | yes |
+
+Sample checks on video (debugging the rules on samples; small timing errors accepted, confirmed
+with the organisers as fine): restarts R1 exact, R2 −1 s, R6 −2 s, R3 −12 s; before fixing two
+restart-detection bugs they were 21–36 s late. Still likely: some short stoppages missed (87 against a
+typical 100–130), and some stoppages start early (R6 detected 1:22:19, real 1:22:30).
+
+The public 5 minutes are not used to compare versions (EVALUATION.md); they will be run once on the
+final pipeline as a check.
+
 ## The labeller (after ETL v1.3)
 
 Approach: a three-state (`H`, `A`, `D`) semi-Markov model decoded with Viterbi over each half.
@@ -150,6 +218,14 @@ Watching to understand the data, not to label it. Times are on the tactical vide
 | `crowd` stretch 0:24:33–0:24:40 | Players lining up for a corner, taken at 0:24:40 (flag ends there) |
 | `crowd` stretch 0:47:03–0:47:37 | Argument with the referee over a penalty, ball out of play; crowd separates around 0:47:37 (flag ends there) |
 | `crowd` stretch 1:32:00–1:32:06 | Set piece being prepared, ball hidden behind a player, visible again 1:32:08–09 |
-| `crowd` stretch 1:47:20–1:47:25 | Inside the cooling break after the goal at 1:45:02; players separate around 1:47:32 (`cooling_break` ends at 1:47:31) |
+| `crowd` stretch 1:47:20–1:47:25 | Inside the cooling break after the goal at 1:45:02; players separate around 1:47:32 (`cooling_break` flag 1:46:18–1:47:25) |
+| Goal 1 | Shot at 0:31:06, in at ~0:31:07 (tracking: ball seen heading in, gone at 0:31:07); tag starts at the attack (0:30:37) |
+| "Goal" tag 0:38:11 | False: offside whistle, then cooling break; a shot went in while the ball was dead. Its kickoff tag (0:41:20) is false too |
+| Penalty goal | Tag starts at the run-up, scored at 0:49:17 |
+| Line crossings A1–A8 | All 8 correct |
+| Ball out at 1:52:37 (Athletic's half) | Not detected as a crossing: ball last seen 5 m from the touchline, then lost |
+| Collective slowdowns B1–B8 | Real stoppages in 7 (fouls, B3 ball out for a Barça goal kick, B4 out in Athletic's half off camera, B7 ball hit the referee). B2 was a false slowdown (no collective slowdown on video), harmless only because it lies inside the stoppage after goal 1 |
+| Keeper with a still ball C1–C5 | C3 dead (foul whistled at 0:45:03 before the keeper had the ball), C5 dead (goal kick); C1, C2, C4 live: keeper held the ball in open play, then dropped it to his feet or threw it |
+| Restart times R1–R6 | R1 0:21:25, R2 0:34:05, R3 0:45:25, R6 stoppage 1:22:30 restart 1:22:32; R4 (0:51:54) a real foul stoppage |
 | Dense-cluster candidates (D9): 0:30:51, 0:38:01–0:38:18, 1:30:43, 1:37:33 | Free kick, corner, corner, free kick: all dead ball; only the first carried a set-piece tag |
-| Cooling-break candidates (D9): 0:39:12–0:40:48 (clock ~31:44), 1:46:18–1:47:31 (clock ~75:28) | Both are cooling breaks |
+| Cooling-break candidates (D9): flags 0:39:12–0:40:44 and 1:46:18–1:47:25 | Both are cooling breaks. First stoppage exactly: whistle 0:38:38, play back 0:41:35 (177 s); the flag marks the break itself, the detector must extend it to the whistle and the restart |
