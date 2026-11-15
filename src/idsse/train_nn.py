@@ -1,6 +1,8 @@
-"""Step 5: a sequence network (bidirectional GRU) over the same inputs and folds as the tree models.
+"""Step 5: sequence networks over the same inputs and folds as the tree models.
 
-    python -m src.idsse.train_nn cv          # leave-one-match-out on DEV; writes cache/idsse/cvpred_nn.npz
+    python -m src.idsse.train_nn cv gru      # leave-one-match-out on DEV; writes cache/idsse/cvpred_nn_gru.npz
+    python -m src.idsse.train_nn cv tcn      # temporal convolutions
+    python -m src.idsse.train_nn cv lstm     # LSTM variant of the GRU
 
 It reads 5 Hz sequences (every 5th frame) in windows of WINDOW steps, looks both ways, and outputs
 P(H, A, D) for every step; predictions are brought back to 25 Hz by repeating each step over its five
@@ -48,16 +50,50 @@ class Scaler:
         return np.concatenate([Z, miss], 1).astype(np.float32)
 
 
-class Net(nn.Module):
-    def __init__(self, n_in):
+class RNNNet(nn.Module):
+    """Bidirectional GRU or LSTM: reads the window forwards and backwards."""
+
+    def __init__(self, n_in, cell="gru"):
         super().__init__()
         self.inp = nn.Sequential(nn.Linear(n_in, HIDDEN), nn.GELU(), nn.Dropout(0.1))
-        self.gru = nn.GRU(HIDDEN, HIDDEN, num_layers=2, batch_first=True, bidirectional=True, dropout=0.1)
+        rnn = nn.GRU if cell == "gru" else nn.LSTM
+        self.rnn = rnn(HIDDEN, HIDDEN, num_layers=2, batch_first=True, bidirectional=True, dropout=0.1)
         self.out = nn.Linear(2 * HIDDEN, 3)
 
     def forward(self, x):
-        h, _ = self.gru(self.inp(x))
+        h, _ = self.rnn(self.inp(x))
         return self.out(h)
+
+
+class TCNBlock(nn.Module):
+    def __init__(self, ch, dilation):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(ch, ch, 3, padding=dilation, dilation=dilation), nn.GELU(), nn.Dropout(0.1),
+            nn.Conv1d(ch, ch, 3, padding=dilation, dilation=dilation))
+        self.norm = nn.GroupNorm(1, ch)
+
+    def forward(self, x):
+        return torch.nn.functional.gelu(self.norm(x + self.net(x)))
+
+
+class TCNNet(nn.Module):
+    """Temporal convolutions looking both ways at several time scales: dilations 1..32 steps give a
+    reach of about +-25 s at 5 Hz."""
+
+    def __init__(self, n_in, dilations=(1, 2, 4, 8, 16, 32)):
+        super().__init__()
+        self.inp = nn.Sequential(nn.Linear(n_in, HIDDEN), nn.GELU(), nn.Dropout(0.1))
+        self.blocks = nn.Sequential(*[TCNBlock(HIDDEN, d) for d in dilations])
+        self.out = nn.Linear(HIDDEN, 3)
+
+    def forward(self, x):
+        h = self.blocks(self.inp(x).transpose(1, 2)).transpose(1, 2)
+        return self.out(h)
+
+
+def make_net(arch, n_in):
+    return TCNNet(n_in) if arch == "tcn" else RNNNet(n_in, cell=arch)
 
 
 def sequences(a, key="X", ykey="y"):
@@ -99,7 +135,7 @@ def predict_match(net, scaler, a):
     return p
 
 
-def train_fold(train, rng):
+def train_fold(train, rng, arch="gru"):
     stop_match, fit_matches = train[0], train[1:]
     raw = [inputs.get(m, l, SEED) for m in fit_matches for l in LEVELS]
     scaler = Scaler().fit(np.concatenate([a["X"][::25] for a in raw]))
@@ -109,7 +145,7 @@ def train_fold(train, rng):
             seqs += [(scaler.transform(X), y) for X, y in sequences(a, key, ykey)]
     del raw
     stop = inputs.get(stop_match, "realistic", SEED)
-    net = Net(seqs[0][0].shape[1]).to(DEVICE)
+    net = make_net(arch, seqs[0][0].shape[1]).to(DEVICE)
     opt = torch.optim.AdamW(net.parameters(), lr=LR, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=LR, total_steps=EPOCHS * 400)
     lossf = nn.CrossEntropyLoss()
@@ -139,25 +175,25 @@ def train_fold(train, rng):
     return net, scaler
 
 
-def cv():
+def cv(arch="gru"):
     torch.manual_seed(0)
     rng = np.random.default_rng(0)
     folds = splits.cv_folds()
     preds, cases = {}, {}
     t0 = time.time()
     for train, val in folds:
-        print("fold -> {} (early stop on {})".format(val, train[0]), flush=True)
-        net, scaler = train_fold(train, rng)
+        print("[{}] fold -> {} (early stop on {})".format(arch, val, train[0]), flush=True)
+        net, scaler = train_fold(train, rng, arch)
         a = inputs.get(val, "realistic", SEED)
         preds[val] = predict_match(net, scaler, a)
         cases[val] = (np.log(np.clip(preds[val], 1e-6, 1)), a["half"], a["y"])
         print("  done ({:.0f} s)".format(time.time() - t0), flush=True)
-    np.savez(os.path.join(OUT, "cvpred_nn.npz"), **preds)
+    np.savez(os.path.join(OUT, "cvpred_nn_{}.npz".format(arch)), **preds)
     res = decode.cv_scores(decode.grid_scores(cases), folds)
     print(res.round(3).to_string(index=False))
-    print("mean spellF1 {:.3f} | macroF1 {:.3f}".format(res.spellF1.mean(), res.macroF1.mean()))
+    print("[{}] mean spellF1 {:.3f} | macroF1 {:.3f}".format(arch, res.spellF1.mean(), res.macroF1.mean()))
 
 
 if __name__ == "__main__":
     if sys.argv[1] == "cv":
-        cv()
+        cv(sys.argv[2] if len(sys.argv) > 2 else "gru")      # gru | lstm | tcn
