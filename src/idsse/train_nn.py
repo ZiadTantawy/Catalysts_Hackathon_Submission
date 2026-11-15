@@ -33,7 +33,11 @@ HIDDEN = 96
 EPOCHS = 12
 BATCH = 64
 LR = 2e-3
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = (
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available()
+    else "cpu"
+)
 OUT = parse.CACHE_DIR
 
 

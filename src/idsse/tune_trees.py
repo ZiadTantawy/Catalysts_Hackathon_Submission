@@ -26,6 +26,19 @@ LEVELS = list(dataset.LEVELS)
 SEED = 1
 OUT = parse.CACHE_DIR
 RNG = np.random.default_rng(20261116)
+N_JOBS = os.cpu_count() or 4
+
+
+def _xgb_device():
+    """CUDA when present; CPU on Apple Silicon / machines without an NVIDIA GPU."""
+    try:
+        import xgboost as xgb
+        build = xgb.build_info() if hasattr(xgb, "build_info") else {}
+        if build.get("USE_CUDA"):
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
 
 SPACES = {
     "lgbm": {"num_leaves": [31, 63, 127, 255], "min_child_samples": [50, 200, 800],
@@ -41,14 +54,15 @@ def make_model(kind, params, n_trees=None):
     if kind == "lgbm":
         import lightgbm as lgb
         return lgb.LGBMClassifier(objective="multiclass", n_estimators=n_trees or 300, learning_rate=0.1,
-                                  subsample_freq=1, verbose=-1, random_state=0, n_jobs=16, **params)
+                                  subsample_freq=1, verbose=-1, random_state=0, n_jobs=N_JOBS, **params)
     if kind == "xgb":
         import xgboost as xgb
         return xgb.XGBClassifier(objective="multi:softprob", n_estimators=n_trees or 300, learning_rate=0.1,
-                                 tree_method="hist", device="cuda", random_state=0, **params)
+                                 tree_method="hist", device=_xgb_device(), random_state=0,
+                                 n_jobs=N_JOBS, **params)
     if kind == "rf":
         from sklearn.ensemble import RandomForestClassifier
-        return RandomForestClassifier(n_estimators=n_trees or 200, max_samples=0.3, n_jobs=16,
+        return RandomForestClassifier(n_estimators=n_trees or 200, max_samples=0.3, n_jobs=N_JOBS,
                                       random_state=0, **params)
     raise ValueError(kind)
 

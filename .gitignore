@@ -75,3 +75,6 @@ outputs/
 # share but lives here too, so it is regenerated rather than stale.
 cache/
 tests/out/
+
+# local training / run logs
+logs/
