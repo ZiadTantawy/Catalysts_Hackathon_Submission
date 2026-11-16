@@ -29,13 +29,17 @@ def cost_matrix(team_cost, dead_cost):
     return c
 
 
-def _viterbi_segment(lp, c):
+def _viterbi_segment(lp, c, team_t=None):
+    """team_t: optional per-frame H <-> A cost (overrides c[H][A] / c[A][H] frame by frame)."""
     n = len(lp)
     back = np.empty((n, 3), np.int8)
     d0, d1, d2 = lp[0]
     c = c.tolist()
     lp = lp.tolist()
+    tt = team_t.tolist() if team_t is not None else None
     for t in range(1, n):
+        if tt is not None:
+            c[0][1] = c[1][0] = tt[t]
         new = []
         for j in range(3):
             a0, a1, a2 = d0 - c[0][j], d1 - c[1][j], d2 - c[2][j]
@@ -55,13 +59,15 @@ def _viterbi_segment(lp, c):
     return path
 
 
-def viterbi(logp, half, team_cost=12.0, dead_cost=8.0):
-    """logp [T, 3]: log P(H), log P(A), log P(D) per frame. Decoded separately in each half."""
+def viterbi(logp, half, team_cost=12.0, dead_cost=8.0, team_cost_t=None):
+    """logp [T, 3]: log P(H), log P(A), log P(D) per frame. Decoded separately in each half.
+    team_cost_t: optional per-frame H <-> A cost, e.g. lower where a turnover is likely."""
     c = cost_matrix(team_cost, dead_cost)
     out = np.empty(len(logp), np.int8)
     starts = np.r_[0, np.flatnonzero(half[1:] != half[:-1]) + 1, len(half)]
     for a, b in zip(starts[:-1], starts[1:]):
-        out[a:b] = _viterbi_segment(np.asarray(logp[a:b], np.float64), c)
+        tt = None if team_cost_t is None else np.asarray(team_cost_t[a:b], np.float64)
+        out[a:b] = _viterbi_segment(np.asarray(logp[a:b], np.float64), c, tt)
     return out
 
 
