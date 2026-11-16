@@ -116,5 +116,55 @@ def main():
           "~100-130 stoppages".format(target))
 
 
+ENSEMBLE = {"lgbm_local": 0.5, "nn_tcn": 0.25, "nn_gru": 0.25}   # src/idsse/ensemble.py, 2026-11-16
+
+
+def nn_probs(arch, bar):
+    """Network trained on all seven IDSSE matches, BAR-ATH probabilities (cached)."""
+    import torch
+    from . import train_nn
+    path = os.path.join(parse.CACHE_DIR, "barath_probs_nn_{}.npy".format(arch))
+    if os.path.exists(path) and "--retrain" not in sys.argv:
+        return np.load(path)
+    torch.manual_seed(0)
+    net, scaler = train_nn.train_fold(splits.ALL, np.random.default_rng(0), arch)
+    p = train_nn.predict_match(net, scaler, {"X": bar["X"], "Xm": bar["Xm"], "half": bar["block"],
+                                             "y": np.zeros(len(bar["X"]), np.int8)})
+    np.save(path, p.astype(np.float32))
+    return p
+
+
+def main_ensemble():
+    """The tree + network mix on BAR-ATH, smoother calibrated the same label-free way as main()."""
+    from . import ensemble
+    t0 = time.time()
+    cv = {k: ensemble.load(k) for k in ENSEMBLE}
+    cv_logp = {v: np.log(np.clip(sum(w * cv[k][v] for k, w in ENSEMBLE.items()), 1e-6, 1)) for v in splits.DEV}
+    cases = {v: (cv_logp[v], inputs.get(v, "realistic", 1)["half"], inputs.get(v, "realistic", 1)["y"])
+             for v in splits.DEV}
+    fixed = decode.pick_costs(decode.grid_scores(cases), splits.DEV)
+    target = idsse_target_rate(cv_logp, fixed)
+    print("ensemble fixed costs {} | IDSSE rate with them {:.2f}/min [{:.0f} s]".format(
+        fixed, target, time.time() - t0), flush=True)
+
+    feats = list(inputs.get(splits.DEV[0], "realistic", 1)["feats"])
+    bar = arrays(feats)
+    probs = {"lgbm_local": np.load(os.path.join(parse.CACHE_DIR, "barath_probs_lgbm.npy"))}
+    for arch in ("tcn", "gru"):
+        probs["nn_" + arch] = nn_probs(arch, bar)
+        print("{} trained on all 7 and predicted BAR-ATH [{:.0f} s]".format(arch, time.time() - t0), flush=True)
+    p = sum(w * probs[k] for k, w in ENSEMBLE.items())
+    logp = np.log(np.clip(p, 1e-6, 1))
+    logp[bar["known_dead"]] = np.log([1e-6, 1e-6, 1.0])
+    g = bar["graded"]
+    tc, _ = rate_match.team_cost_for_rate(logp[g], bar["block"][g], target, fixed["dead_cost"])
+    codes = decode.viterbi(logp, bar["block"], tc, fixed["dead_cost"])
+    write(os.path.join(RESULTS, "idsse_ensemble_rated.csv"), codes, g)
+    print(pd.DataFrame([summary(codes, g, "ensemble, rate-calibrated (team {})".format(tc))]).to_string(index=False))
+
+
 if __name__ == "__main__":
-    main()
+    if "ensemble" in sys.argv:
+        main_ensemble()
+    else:
+        main()
