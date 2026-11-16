@@ -1,0 +1,2 @@
+# trained models must reach every machine byte-for-byte (no line-ending conversion)
+models/** -text
