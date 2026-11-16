@@ -14,7 +14,8 @@ import numpy as np
 
 from . import dataset, parse, prep
 
-INPUT_DIR = os.path.join(parse.CACHE_DIR, "inputs")
+VERSION = os.environ.get("IDSSE_INPUTS", "v2")      # v1: long context only; v2: + touch chain
+INPUT_DIR = os.path.join(parse.CACHE_DIR, "inputs" if VERSION == "v1" else "inputs_" + VERSION)
 
 
 def get(mid, level, seed, force=False):
@@ -22,7 +23,7 @@ def get(mid, level, seed, force=False):
     if os.path.exists(path) and not force:
         z = np.load(path, allow_pickle=False)
         return {k: z[k] for k in z.files} | {"feats": list(z["feats"])}
-    df = prep.add_long_context(dataset.match_table(mid, level, seed))
+    df = prep.model_frame(dataset.match_table(mid, level, seed), touch_chain=VERSION != "v1")
     feats = dataset.feature_columns(df)
     sw = prep.swap_home_away(df)
     out = {"X": df[feats].to_numpy(np.float32), "Xm": sw[feats].to_numpy(np.float32),

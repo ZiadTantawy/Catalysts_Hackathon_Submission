@@ -200,7 +200,8 @@ def cv(arch="gru"):
         preds[val] = predict_match(net, scaler, a)
         cases[val] = (np.log(np.clip(preds[val], 1e-6, 1)), a["half"], a["y"])
         print("  done ({:.0f} s)".format(time.time() - t0), flush=True)
-    np.savez(os.path.join(OUT, "cvpred_nn_{}.npz".format(arch)), **preds)
+    suffix = "" if inputs.VERSION == "v1" else "_" + inputs.VERSION     # keep earlier results
+    np.savez(os.path.join(OUT, "cvpred_nn_{}{}.npz".format(arch, suffix)), **preds)
     res = decode.cv_scores(decode.grid_scores(cases), folds)
     print(res.round(3).to_string(index=False))
     print("[{}] mean spellF1 {:.3f} | macroF1 {:.3f}".format(arch, res.spellF1.mean(), res.macroF1.mean()))

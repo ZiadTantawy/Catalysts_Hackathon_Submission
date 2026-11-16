@@ -22,7 +22,10 @@ import pandas as pd
 from ..etl import config as C
 
 SIGNED = {"d1_diff", "closer_team", "contact_team", "control_team", "last_contact_team",
-          "last_control_team", "off_near_team"}   # closer_run is an unsigned run length: unchanged
+          "last_control_team", "off_near_team",   # closer_run is an unsigned run length: unchanged
+          # touch-chain inputs (add_touch_chain): team signs and signed chain lengths
+          "touch_prev1", "touch_prev2", "touch_prev3", "touch_next1", "touch_next2", "touch_next3",
+          "touch_prev3_sum", "touch_next3_sum", "touch_chain_prev", "touch_chain_next"}
 X_POS = {"ball_x", "ball_last_x", "ball_next_x"}
 Y_POS = {"ball_y", "ball_last_y", "ball_next_y"}
 Y_PAIRS = {"cy"}       # team columns in pitch y (not the team's own frame): exchanged AND mirrored
@@ -44,6 +47,63 @@ def add_long_context(df):
             nxt = g[col].transform(lambda x: x.astype(np.float32)[::-1].rolling(w, min_periods=1).mean()[::-1])
             out["{}__p{}".format(col, name)] = past.astype(np.float32)
             out["{}__n{}".format(col, name)] = nxt.astype(np.float32)
+    return pd.concat([df, pd.DataFrame(out, index=df.index)], axis=1)
+
+
+def model_frame(df, touch_chain=True):
+    """Everything the models read, on top of the ETL frames table. Used for IDSSE and BAR-ATH alike."""
+    out = add_long_context(df)
+    return add_touch_chain(out) if touch_chain else out
+
+
+def add_touch_chain(df):
+    """Inputs from the sequence of touches (the ETL's contact_team runs: a measured player close to a
+    ball that reacts), per frame and inside each half:
+      touch_prev1..3 / touch_next1..3   team (+1 home / -1 away) of the last / next three touches
+      touch_prev3_sum / touch_next3_sum their sum (-3..3): who dominates the recent / coming touches
+      touch_chain_prev / _next          signed number of consecutive same-team touches ending at the
+                                        last touch / starting at the next one (+ home, - away)
+      frames_since_touch / frames_until_touch
+    Why: on the IDSSE folds 75% of missed turnovers had a touch by the new team, but the ETL's control
+    signal (0.48 s of continuous contact) flipped in only 25%: quick one- and two-touch play never
+    becomes "control". The challenge's own proxy for control is consecutive passes."""
+    c = df["contact_team"].to_numpy()
+    half = df["half"].to_numpy()
+    n = len(c)
+    start = (c != 0) & np.r_[True, (c[1:] != c[:-1]) | (half[1:] != half[:-1])]
+    t_frames = np.flatnonzero(start)
+    t_team = c[t_frames].astype(np.int8)
+    t_half = half[t_frames]
+    k = len(t_frames)
+    # signed chain length at each touch: consecutive same-team touches up to it (prev) / from it (next)
+    up = np.zeros(k, np.int16)
+    for i in range(k):
+        up[i] = up[i - 1] + 1 if i and t_team[i] == t_team[i - 1] and t_half[i] == t_half[i - 1] else 1
+    down = np.zeros(k, np.int16)
+    for i in range(k - 1, -1, -1):
+        down[i] = down[i + 1] + 1 if i < k - 1 and t_team[i] == t_team[i + 1] and t_half[i] == t_half[i + 1] else 1
+    last = np.searchsorted(t_frames, np.arange(n), side="right") - 1        # index of last touch <= t
+    nxt = last + 1                                                          # index of next touch > t
+
+    def team_at(idx):
+        ok = (idx >= 0) & (idx < k)
+        safe = np.clip(idx, 0, max(k - 1, 0))
+        same_half = ok & (t_half[safe] == half) if k else ok
+        return np.where(same_half, t_team[safe] if k else 0, 0).astype(np.int8), same_half
+
+    out = {}
+    for j in (1, 2, 3):
+        out["touch_prev{}".format(j)], _ = team_at(last - (j - 1))
+        out["touch_next{}".format(j)], _ = team_at(nxt + (j - 1))
+    out["touch_prev3_sum"] = (out["touch_prev1"] + out["touch_prev2"] + out["touch_prev3"]).astype(np.int8)
+    out["touch_next3_sum"] = (out["touch_next1"] + out["touch_next2"] + out["touch_next3"]).astype(np.int8)
+    tp, okp = team_at(last)
+    tn, okn = team_at(nxt)
+    safe_l, safe_n = np.clip(last, 0, max(k - 1, 0)), np.clip(nxt, 0, max(k - 1, 0))
+    out["touch_chain_prev"] = np.where(okp, tp * (up[safe_l] if k else 0), 0).astype(np.int16)
+    out["touch_chain_next"] = np.where(okn, tn * (down[safe_n] if k else 0), 0).astype(np.int16)
+    out["frames_since_touch"] = np.where(okp, np.arange(n) - (t_frames[safe_l] if k else 0), -1).astype(np.int32)
+    out["frames_until_touch"] = np.where(okn, (t_frames[safe_n] if k else 0) - np.arange(n), -1).astype(np.int32)
     return pd.concat([df, pd.DataFrame(out, index=df.index)], axis=1)
 
 

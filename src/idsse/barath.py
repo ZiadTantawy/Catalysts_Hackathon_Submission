@@ -29,7 +29,8 @@ FPS = 25
 
 def arrays(feats):
     """BAR-ATH inputs in the IDSSE feature order (frames table from the etl-v1.3 build)."""
-    df = prep.add_long_context(pd.read_parquet(os.path.join(degrade.barath_cache_dir(), "frames.parquet")))
+    df = prep.model_frame(pd.read_parquet(os.path.join(degrade.barath_cache_dir(), "frames.parquet")),
+                          touch_chain=inputs.VERSION != "v1")
     missing = [c for c in feats if c not in df.columns]
     if missing:
         raise RuntimeError("BAR-ATH lacks {} inputs, e.g. {}".format(len(missing), missing[:5]))
