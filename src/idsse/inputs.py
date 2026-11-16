@@ -14,8 +14,18 @@ import numpy as np
 
 from . import dataset, parse, prep
 
-VERSION = os.environ.get("IDSSE_INPUTS", "v2")      # v1: long context only; v2: + touch chain
-INPUT_DIR = os.path.join(parse.CACHE_DIR, "inputs" if VERSION == "v1" else "inputs_" + VERSION)
+VERSION = os.environ.get("IDSSE_INPUTS", "v1")      # v1: long context only; v2: + touch chain (no gain)
+LABELS = os.environ.get("IDSSE_LABELS", "b")        # b: variant B; v3: turnovers snapped to first touch
+INPUT_DIR = os.path.join(parse.CACHE_DIR, ("inputs" if VERSION == "v1" else "inputs_" + VERSION)
+                         + ("" if LABELS == "b" else "_labels_" + LABELS))
+_SNAPPED = {}
+
+
+def _labels_v3(mid):
+    from . import bench
+    if mid not in _SNAPPED:
+        _SNAPPED[mid] = bench.snapped_codes(mid, parse.load_match(mid, quiet=True)).astype(np.int8)
+    return _SNAPPED[mid]
 
 
 def get(mid, level, seed, force=False):
@@ -24,6 +34,8 @@ def get(mid, level, seed, force=False):
         z = np.load(path, allow_pickle=False)
         return {k: z[k] for k in z.files} | {"feats": list(z["feats"])}
     df = prep.model_frame(dataset.match_table(mid, level, seed), touch_chain=VERSION != "v1")
+    if LABELS == "v3":
+        df["label"] = _labels_v3(mid)
     feats = dataset.feature_columns(df)
     sw = prep.swap_home_away(df)
     out = {"X": df[feats].to_numpy(np.float32), "Xm": sw[feats].to_numpy(np.float32),

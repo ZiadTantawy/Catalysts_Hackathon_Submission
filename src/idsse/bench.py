@@ -37,6 +37,22 @@ def variant_b_codes(mid, m):
     return events.event_confirmed_relabel(raw, m["half"], events.event_turnovers(ctl, raw))
 
 
+SNAP_WINDOW = int(1.5 * 25)        # frames either side of a variant-B turnover searched for the touch
+SNAP_RADIUS = 1.0                  # m: a player of the new team this close to the ball = a touch
+
+
+def snapped_codes(mid, m):
+    """Variant B with every live turnover moved to the new team's first touch in the CLEAN tracking
+    (labels v3). Why: the BAR-ATH ground truth flips "near the new team's first contact" (docs/PLAN.md);
+    variant B puts the change where DFL's flag changed, which on the IDSSE folds caps even a model on
+    perfect tracking at spellF1 ~0.77. Dead ball and restarts are unchanged."""
+    from . import boundaries
+    codes = variant_b_codes(mid, m)
+    near = labels.nearest_player_team(m, SNAP_RADIUS)
+    sign = np.where(near == 0, 1, np.where(near == 1, -1, 0)).astype(np.int8)
+    return boundaries.snap_to_contact(codes, sign, m["half"], SNAP_WINDOW)
+
+
 def nearest_codes(atd):
     """Team (0 / 1) of the nearest tracked slot to the ball, -1 where the ball is not seen. Guessed
     positions count, as in starter/baseline.py (it reads every slot the ATD reports)."""
