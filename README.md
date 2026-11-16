@@ -34,6 +34,9 @@ Full write-up of the build steps: [docs/IDSSE_SUBMISSION.md](docs/IDSSE_SUBMISSI
 Results and experiment log: [docs/IDSSE_RESULTS.md](docs/IDSSE_RESULTS.md).  
 Technical document for the organisers: [Catalysts.md](Catalysts.md) / [Catalysts.pdf](Catalysts.pdf).
 
+**Public repository (use this URL on the form):**
+https://github.com/ZiadTantawy/Catalysts_Hackathon_Submission
+
 ## What the submission is
 
 - **ETL (etl-v1.3):** deterministic cleaning and frame features from the tactical ATD (measured

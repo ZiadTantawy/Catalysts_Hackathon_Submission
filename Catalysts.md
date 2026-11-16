@@ -3,7 +3,7 @@
 **Team:** Catalysts  
 **Challenge:** More than a Hack 2027, Phase 1 — Ball Possession (Barcelona vs Athletic Club)  
 **Deliverable:** `Catalysts.csv` (199,319 frames)  
-**Repository:** https://github.com/ZiadTantawy/Catalysts_Hackathon_Submission (branch `ZiadTantawy/idsse_training`)
+**Repository:** https://github.com/ZiadTantawy/Catalysts_Hackathon_Submission
 
 ---
 
