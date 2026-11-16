@@ -75,8 +75,10 @@ _EMPTY_TAGS = pd.DataFrame({"code_key": pd.Series(dtype=str), "side": pd.Series(
                             "type": pd.Series(dtype=str)})
 
 
-def build_frames(atd):
-    """Stages 3-7 of src/etl/build.py on ATD-shaped arrays. Returns (frames table, events table)."""
+def build_frames(atd, extra=False):
+    """Stages 3-7 of src/etl/build.py on ATD-shaped arrays. Returns (frames table, events table), and
+    with extra=True also the measured players' mean speed per frame (the dead-ball detector's input,
+    src/model/deadball.py measured_speed)."""
     half = atd["half"]
     n = len(half)
     tl = timeline(half)
@@ -107,4 +109,9 @@ def build_frames(atd):
     ev, _ = ball.events(ball_cols, half, near, con_episodes)
     _, run_id = ball.runs_table(ball_cols, half)
     df["ball_run_id"] = run_id
+    if extra:
+        sp = np.where(pl["meas"] & (pl["team"] >= 0), p_o[..., 2], np.nan)
+        with np.errstate(all="ignore"):
+            speed = np.nanmean(np.where(np.isfinite(sp), sp, np.nan), axis=1)
+        return df, ev, speed
     return df, ev
