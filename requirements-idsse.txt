@@ -1,0 +1,11 @@
+# IDSSE training track (src/idsse). Versions used to train the committed models (models/idsse/) and
+# to build Catalysts.csv. `predict` runs on the CPU, so any of these torch builds works (CUDA, MPS, CPU).
+numpy==2.2.6
+pandas==2.3.2
+pyarrow==21.0.0
+scipy==1.16.2
+scikit-learn==1.9.1
+lightgbm==4.7.0
+torch==2.7.1
+# only for retraining / tuning (src/idsse/tune_trees.py), not for building the submission
+xgboost==3.4.1

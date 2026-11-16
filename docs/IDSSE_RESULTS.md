@@ -62,7 +62,44 @@ data about the provided game ("possession data or annotations of any kind"), als
 An earlier version of this table compared the models' home share with such a figure; it was removed
 (2026-11-16).
 
+## 3b. Runs on 2026-11-16 (Windows, RTX 3060) and the final configuration
+
+Smoother calibration without BAR-ATH labels (`src/idsse/rate_match.py`, `src/idsse/barath.py`): on the
+IDSSE folds the best fixed smoother costs decode ~91% of the true possessions, and matching the true
+count exactly scores slightly worse (0.667 vs 0.681). On BAR-ATH the IDSSE-picked cost merged
+possessions (3.30 per live minute), so the team-switch cost is set on BAR-ATH to reproduce the IDSSE
+behaviour (3.75 per live minute). The graded frames before the 2nd-half kickoff are forced dead.
+
+| Run (BAR-ATH public 5 min, smoke test only) | spellF1 | macroF1 | possessions (gt 17) |
+|---|---:|---:|---:|
+| LightGBM, fixed smoother | 0.629 | 0.829 | 11 |
+| LightGBM, calibrated smoother | 0.680 | 0.827 | 13 |
+| LightGBM 0.5 + TCN 0.25 + GRU 0.25, calibrated (final configuration) | 0.613 | 0.855 | 13 |
+
+The final configuration was chosen on the IDSSE folds (spellF1 0.690, macroF1 0.888), not on these rows.
+
+Experiments that did not help (IDSSE folds, spellF1, all settings chosen per fold on training matches):
+
+| Experiment | Result |
+|---|---|
+| Tree + network mixes (15 weightings) | 0.677-0.694, no mix clearly better |
+| Snap possession changes to the new team's first touch | 0.690 -> 0.690 |
+| Turnover model + frame-varying switch cost | 0.689 -> 0.693 |
+| Dead-ball detector (src/model/deadball.py) as extra D evidence | every fold picked "no fusion" |
+| Two-stage decoding (dead/live, then team per live stretch) | 0.676 (worse) |
+| Remove short possessions after decoding | 0.687 |
+| Touch-chain inputs (last / next three touches, chains) | LightGBM 0.674, GRU 0.678 (worse) |
+| Labels with turnovers snapped to the first touch | 0.677; DFL's flag already changes within ~0.1 s of it |
+
+Diagnostics: making the team right on live frames with the ball visible would lift the bench to 0.90,
+with the ball unseen only to 0.75, at restarts to 0.71. A model trained and tested on clean IDSSE reaches
+0.77, one trained on clean and tested on degraded data 0.48: training on degraded data is essential, and
+the remaining gap is mostly ambiguous turnovers, not tracking noise.
+
 ## 4. How to reproduce
+
+To build the submission from the committed models: **docs/IDSSE_SUBMISSION.md**
+(`python -m src.idsse.final predict`). The commands below are the full retraining run on a Mac.
 
 ```bash
 export BARATH_CACHE=/path/to/etl/cache   # needs frames.parquet
