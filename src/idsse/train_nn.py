@@ -31,13 +31,17 @@ STEP = 5                 # 25 Hz -> 5 Hz
 WINDOW = 150             # steps (30 s at 5 Hz)
 HIDDEN = 96
 EPOCHS = 12
-BATCH = 64
+BATCH = 256              # 4 x the first version with 1/4 of the steps: same windows per epoch, fewer launches
+STEPS_PER_EPOCH = 100
 LR = 2e-3
 DEVICE = (
     "cuda" if torch.cuda.is_available()
     else "mps" if torch.backends.mps.is_available()
     else "cpu"
 )
+AMP = DEVICE == "cuda"   # mixed precision (float16) on NVIDIA GPUs; full precision elsewhere
+if AMP:
+    torch.backends.cudnn.benchmark = True
 OUT = parse.CACHE_DIR
 
 
@@ -121,8 +125,8 @@ def windows(seqs, rng):
 
 def predict_seq(net, X):
     net.eval()
-    with torch.no_grad():
-        logits = net(torch.from_numpy(X[None]).to(DEVICE))[0]
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=AMP):
+        logits = net(torch.from_numpy(X[None]).to(DEVICE))[0].float()
     return torch.softmax(logits, -1).cpu().numpy()
 
 
@@ -151,24 +155,28 @@ def train_fold(train, rng, arch="gru"):
     stop = inputs.get(stop_match, "realistic", SEED)
     net = make_net(arch, seqs[0][0].shape[1]).to(DEVICE)
     opt = torch.optim.AdamW(net.parameters(), lr=LR, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=LR, total_steps=EPOCHS * 400)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=LR, total_steps=EPOCHS * STEPS_PER_EPOCH)
     lossf = nn.CrossEntropyLoss()
+    scaler_amp = torch.amp.GradScaler("cuda", enabled=AMP)
     best, best_state = np.inf, None
     for ep in range(EPOCHS):
         net.train()
         Xw, yw = windows(seqs, rng)
         order = rng.permutation(len(Xw))
         for b, s in enumerate(range(0, len(order), BATCH)):
-            if b >= 400:
+            if b >= STEPS_PER_EPOCH:
                 break
             j = order[s:s + BATCH]
-            x = torch.from_numpy(Xw[j]).to(DEVICE)
-            y = torch.from_numpy(yw[j].astype(np.int64)).to(DEVICE)
-            loss = lossf(net(x).reshape(-1, 3), y.reshape(-1))
-            opt.zero_grad()
-            loss.backward()
+            x = torch.from_numpy(Xw[j]).to(DEVICE, non_blocking=True)
+            y = torch.from_numpy(yw[j].astype(np.int64)).to(DEVICE, non_blocking=True)
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=AMP):
+                loss = lossf(net(x).reshape(-1, 3).float(), y.reshape(-1))
+            opt.zero_grad(set_to_none=True)
+            scaler_amp.scale(loss).backward()
+            scaler_amp.unscale_(opt)
             nn.utils.clip_grad_norm_(net.parameters(), 1.0)
-            opt.step()
+            scaler_amp.step(opt)
+            scaler_amp.update()
             sched.step()
         p = predict_match(net, scaler, stop)
         ll = float(-np.mean(np.log(np.clip(p[np.arange(len(p)), stop["y"]], 1e-6, 1))))
