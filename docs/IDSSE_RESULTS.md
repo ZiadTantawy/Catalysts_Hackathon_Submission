@@ -47,17 +47,20 @@ Public GT home share of live play in the window: **57.3%**.
 
 ## 3. Full-match label-free check (graded frames)
 
-| Model | Home share | Away share | Ball in play | Stoppages | Possessions | Mean spell |
-|---|---:|---:|---:|---:|---:|---:|
-| idsse_rf | 63.2% | 36.8% | 59.5 min | 110 | 171 | 20.9 s |
-| idsse_lgbm | 62.3% | 37.7% | 59.6 min | 109 | 193 | 18.5 s |
-| idsse_combined | 63.5% | 36.5% | 59.5 min | 107 | 179 | 19.9 s |
-| idsse_xgb | 63.1% | 36.9% | 60.0 min | 111 | 188 | 19.1 s |
-| baseline_smooth125 | 56.7% | 43.3% | 82.3 min | 79 | 398 | 12.4 s |
-
-External match possession figure used for sanity: **Barça 65% / Athletic 35%**. Models ~62–63% / ~37% (~2 pp off).
+| Model | Ball in play | Stoppages | Possessions | Mean spell |
+|---|---:|---:|---:|---:|
+| idsse_rf | 59.5 min | 110 | 171 | 20.9 s |
+| idsse_lgbm | 59.6 min | 109 | 193 | 18.5 s |
+| idsse_combined | 59.5 min | 107 | 179 | 19.9 s |
+| idsse_xgb | 60.0 min | 111 | 188 | 19.1 s |
+| baseline_smooth125 | 82.3 min | 79 | 398 | 12.4 s |
 
 Football priors: ball in play ~52–58 min; stoppages ~100–130; mean possession ~14 s. Stoppage count looks right; ball-in-play a bit high; spells a bit long (same merge issue).
+
+Not used, on purpose: published possession statistics for BAR-ATH. RULES.md forbids any human-produced
+data about the provided game ("possession data or annotations of any kind"), also as a sanity check.
+An earlier version of this table compared the models' home share with such a figure; it was removed
+(2026-11-16).
 
 ## 4. How to reproduce
 
@@ -77,4 +80,6 @@ Artifacts (gitignored, local only): `cache/idsse/tuning_*.csv`, `cv_trees_final.
 1. IDSSE bench numbers are **good**.
 2. Transfer to BAR-ATH public window is **positive** vs baselines, not finished.
 3. Main gap: **under-segmentation** (merged possessions) — tune decoder costs / duration prior next, not more tree capacity.
-4. Full-match possession share matches the published 65/35 split closely enough to pass a sanity check.
+   This must be done without BAR-ATH labels: never on the public window (EVALUATION.md, RULES.md).
+4. The public-window ranking of the four submissions (RF first) is not a basis for choosing a model:
+   17 possessions cannot rank versions. Models are chosen on the IDSSE folds only.
